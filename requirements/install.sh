@@ -3738,7 +3738,8 @@ install_robotwin_env() {
         cuda_minor="${cuda_mm##* }"
         if [ "$cuda_major" -gt 12 ] || { [ "$cuda_major" -eq 12 ] && [ "$cuda_minor" -ge 8 ]; }; then
             # Include Blackwell support for CUDA 12.8+
-            export TORCH_CUDA_ARCH_LIST="7.0;8.0;9.0;10.0"
+            # local patch: system nvcc is 12.4 (no compute_100); 8.6 for RTX 3090, PTX lets Blackwell JIT
+            export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.0;8.6;8.9;9.0+PTX}"
         else
             export TORCH_CUDA_ARCH_LIST="7.0;8.0;9.0"
         fi
