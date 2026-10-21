@@ -119,6 +119,11 @@ def _register_builtin_models():
 
         return get_model(cfg, torch_dtype)
 
+    def _build_gap_flow(cfg: DictConfig, torch_dtype):
+        from rlinf.models.embodiment.gap_flow.gap_flow_rl import get_model
+
+        return get_model(cfg, torch_dtype)
+
     def _build_lingbotvla(cfg: DictConfig, torch_dtype):
         from rlinf.models.embodiment.lingbotvla import get_model
 
@@ -264,6 +269,12 @@ def _register_builtin_models():
     register_model(
         SupportedModel.FLOW_POLICY.value,
         _build_flow_policy,
+        category="embodied",
+        force=True,
+    )
+    register_model(
+        "gap_flow",
+        _build_gap_flow,
         category="embodied",
         force=True,
     )

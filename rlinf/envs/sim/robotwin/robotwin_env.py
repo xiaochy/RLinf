@@ -205,7 +205,16 @@ class RoboTwinEnv(gym.Env):
             batch_wrist_images = None
         batch_states = torch.stack([torch.from_numpy(state) for state in batch_states])
 
+        # Optional extras (see update_obs in robotwin/envs/vector_env.py); only when enabled.
+        extra_obs = {}
+        for key in ("head_depth", "head_intrinsic", "head_extrinsic", "ee_state"):
+            if all(key in obs for obs in raw_obs):
+                extra_obs[key] = torch.stack(
+                    [torch.from_numpy(np.asarray(obs[key])) for obs in raw_obs]
+                )
+
         extracted_obs = {
+            **extra_obs,
             "main_images": batch_images,
             "wrist_images": batch_wrist_images,
             "states": batch_states,
