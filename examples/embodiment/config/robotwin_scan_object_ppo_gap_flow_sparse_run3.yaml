@@ -30,8 +30,8 @@ runner:
   max_steps: -1
 
   only_eval: False
-  val_check_interval: 4
-  save_interval: 4
+  val_check_interval: -1 # in-training eval off; full evals run separately on the step-20 and step-40 checkpoints
+  save_interval: 4 # keep resumable (the memory guard can kill a run)
 
   resume_dir: null # Optional: path to a saved checkpoint directory, such as 'checkpoints/global_step_10'. If not None, it will be used to resume training.
   ckpt_path: null  # Optional: path to a .pt checkpoint. If not None, it will be loaded after the model is instantiated (for evaluation).
