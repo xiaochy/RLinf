@@ -72,11 +72,18 @@ def compute_patch_centers_world(
 def batch_patch_centers(head_depth, head_intrinsic, head_extrinsic) -> torch.Tensor:
     """[B, H, W], [B, 3, 3], [B, 3, 4] (tensors or arrays) -> [B, N, 3] float32 tensor."""
     depth = np.asarray(head_depth.cpu() if torch.is_tensor(head_depth) else head_depth)
-    k = np.asarray(head_intrinsic.cpu() if torch.is_tensor(head_intrinsic) else head_intrinsic)
-    e = np.asarray(head_extrinsic.cpu() if torch.is_tensor(head_extrinsic) else head_extrinsic)
+    k = np.asarray(
+        head_intrinsic.cpu() if torch.is_tensor(head_intrinsic) else head_intrinsic
+    )
+    e = np.asarray(
+        head_extrinsic.cpu() if torch.is_tensor(head_extrinsic) else head_extrinsic
+    )
     return torch.from_numpy(
         np.stack(
-            [compute_patch_centers_world(depth[i], k[i], e[i]) for i in range(depth.shape[0])]
+            [
+                compute_patch_centers_world(depth[i], k[i], e[i])
+                for i in range(depth.shape[0])
+            ]
         )
     )
 
@@ -85,8 +92,8 @@ class GapDinoExtractor:
     """DINOv2 ViT-L/14(+reg) patch features for batched uint8 RGB images.
 
     Matches GAPPolicyWrapper.extract_dino_features: resize to the nearest multiple of 14
-    (240x320 -> 238x322), ImageNet normalisation, optional RGB<->BGR swap (the training features
-    were extracted from channel-swapped images, see deploy_policy swap_rgb_channels).
+    (240x320 -> 238x322), ImageNet normalisation. Images stay true RGB end to end (the training
+    features were extracted from true-RGB frames); there is no channel swap.
     """
 
     def __init__(
@@ -95,7 +102,6 @@ class GapDinoExtractor:
         weights_path: str | None = None,
         repo_dir: str | None = None,
         model_name: str = "dinov2_vitl14_reg",
-        swap_rgb: bool = True,
         device="cuda",
     ):
         if gap_root not in sys.path:
@@ -106,7 +112,6 @@ class GapDinoExtractor:
         weights_path = weights_path or os.path.join(
             gap_root, "pretrained/dinov2_vitl14_reg4_pretrain.pth"
         )
-        self.swap_rgb = swap_rgb
         self.device = torch.device(device)
         self.model = (
             DINOV2(
@@ -118,14 +123,16 @@ class GapDinoExtractor:
             .to(self.device)
             .eval()
         )
-        self.mean = torch.tensor([0.485, 0.456, 0.406], device=self.device).view(1, 3, 1, 1)
-        self.std = torch.tensor([0.229, 0.224, 0.225], device=self.device).view(1, 3, 1, 1)
+        self.mean = torch.tensor([0.485, 0.456, 0.406], device=self.device).view(
+            1, 3, 1, 1
+        )
+        self.std = torch.tensor([0.229, 0.224, 0.225], device=self.device).view(
+            1, 3, 1, 1
+        )
 
     @torch.no_grad()
     def __call__(self, rgb: torch.Tensor) -> torch.Tensor:
         """rgb: [B, H, W, 3] uint8 -> [B, 1, N, D] float features."""
-        if self.swap_rgb:
-            rgb = rgb.flip(-1)
         img = rgb.to(self.device).permute(0, 3, 1, 2).float() / 255.0
         h, w = img.shape[-2:]
         th, tw = max(round(h / 14) * 14, 14), max(round(w / 14) * 14, 14)

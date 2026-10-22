@@ -60,7 +60,6 @@ class GapFlowRL(nn.Module, BasePolicy):
         self.ignore_last = bool(gf.get("ignore_last", False))
         self.add_value_head = bool(cfg.get("add_value_head", True))
         self.detach_critic_input = bool(gf.get("detach_critic_input", True))
-        self.swap_rgb = bool(gf.get("swap_rgb", True))
         self.use_ema = bool(gf.get("use_ema", True))
         self.dino_weights_path = gf.get("dino_weights_path", None)
         self.autocast_bf16 = bool(gf.get("autocast_bf16", True))
@@ -71,8 +70,12 @@ class GapFlowRL(nn.Module, BasePolicy):
 
         ckpt = torch.load(str(cfg.model_path), map_location="cpu")
         gcfg = OmegaConf.create(ckpt["cfg"])
-        assert gcfg.policy.generative_mode == "flow_matching", gcfg.policy.generative_mode
-        assert gcfg.get("aux_task", "none") == "none", "action-only (aux_task=none) checkpoint required"
+        assert gcfg.policy.generative_mode == "flow_matching", (
+            gcfg.policy.generative_mode
+        )
+        assert gcfg.get("aux_task", "none") == "none", (
+            "action-only (aux_task=none) checkpoint required"
+        )
         self.policy = hydra.utils.instantiate(gcfg.policy)
         self.policy.set_normalizer(_StateDictHolder(ckpt["normalizer"]))
         weights = ckpt["ema"] if (self.use_ema and "ema" in ckpt) else ckpt["model"]
@@ -81,7 +84,9 @@ class GapFlowRL(nn.Module, BasePolicy):
 
         self.horizon = int(self.policy.horizon)
         self.action_dim = int(self.policy.action_dim)
-        self.num_action_chunks = int(cfg.get("num_action_chunks", self.policy.n_action_steps))
+        self.num_action_chunks = int(
+            cfg.get("num_action_chunks", self.policy.n_action_steps)
+        )
         assert self.num_action_chunks <= self.horizon
         if self.add_value_head:
             self.value_head = ValueHead(
@@ -111,7 +116,6 @@ class GapFlowRL(nn.Module, BasePolicy):
                 GapDinoExtractor(
                     self.gap_root,
                     weights_path=self.dino_weights_path,
-                    swap_rgb=self.swap_rgb,
                     device=self.device,
                 )
             )
@@ -140,21 +144,25 @@ class GapFlowRL(nn.Module, BasePolicy):
     def _encode(self, obs: dict[str, torch.Tensor]) -> dict[str, Any]:
         state_xyz, patch_centers = self.policy._extract_rope_coords(obs)
         nobs = self.policy.normalizer.normalize(obs)
-        memory, memory_pos, memory_coords, memory_rope_mask = self.policy.encode_observations(
-            nobs, state_xyz=state_xyz, patch_centers=patch_centers
+        memory, memory_pos, memory_coords, memory_rope_mask = (
+            self.policy.encode_observations(
+                nobs, state_xyz=state_xyz, patch_centers=patch_centers
+            )
         )
-        return dict(
-            memory=memory,
-            memory_pos=memory_pos,
-            memory_coords=memory_coords,
-            memory_rope_mask=memory_rope_mask,
-            state_xyz=state_xyz,
-            patch_centers=patch_centers,
-        )
+        return {
+            "memory": memory,
+            "memory_pos": memory_pos,
+            "memory_coords": memory_coords,
+            "memory_rope_mask": memory_rope_mask,
+            "state_xyz": state_xyz,
+            "patch_centers": patch_centers,
+        }
 
     def _velocity(self, x_t, t, enc, return_hidden=False):
         with self._autocast():
-            out = self.policy.predict_velocity(x_t, t, return_hidden=return_hidden, **enc)
+            out = self.policy.predict_velocity(
+                x_t, t, return_hidden=return_hidden, **enc
+            )
         if return_hidden:
             return out[0].float(), out[1]
         return out.float()
@@ -177,7 +185,9 @@ class GapFlowRL(nn.Module, BasePolicy):
     def forward(self, forward_type=ForwardType.DEFAULT, **kwargs):
         if forward_type == ForwardType.DEFAULT:
             return self.default_forward(**kwargs)
-        raise NotImplementedError(f"GapFlowRL does not support forward_type={forward_type}")
+        raise NotImplementedError(
+            f"GapFlowRL does not support forward_type={forward_type}"
+        )
 
     @torch.no_grad()
     def predict_action_batch(
@@ -192,7 +202,11 @@ class GapFlowRL(nn.Module, BasePolicy):
     ):
         del kwargs
         return self.predict_from_policy_obs(
-            self._policy_obs_from_env(env_obs), mode, compute_values, noise=noise, rng=rng
+            self._policy_obs_from_env(env_obs),
+            mode,
+            compute_values,
+            noise=noise,
+            rng=rng,
         )
 
     @torch.no_grad()
@@ -210,7 +224,12 @@ class GapFlowRL(nn.Module, BasePolicy):
         enc = self._encode(obs)
         if noise is None:
             noise = torch.randn(
-                B, self.horizon, self.action_dim, device=device, dtype=torch.float32, generator=rng
+                B,
+                self.horizon,
+                self.action_dim,
+                device=device,
+                dtype=torch.float32,
+                generator=rng,
             )
         N = self.num_steps
         replay = {
@@ -221,20 +240,31 @@ class GapFlowRL(nn.Module, BasePolicy):
 
         if mode == "eval":
             x0 = self.policy._flow_integrate(
-                noise, enc["memory"], enc["memory_pos"], enc["memory_coords"],
-                enc["memory_rope_mask"], enc["state_xyz"], enc["patch_centers"], num_steps=N,
+                noise,
+                enc["memory"],
+                enc["memory_pos"],
+                enc["memory_coords"],
+                enc["memory_rope_mask"],
+                enc["state_xyz"],
+                enc["patch_centers"],
+                num_steps=N,
             )
             actions = self._decode(x0)
             return actions, {
                 "prev_logprobs": None,
                 "prev_values": None,
-                "forward_inputs": {"action": actions.reshape(B, -1).contiguous(),
-                                   "model_action": x0.reshape(B, -1).contiguous(), **replay},
+                "forward_inputs": {
+                    "action": actions.reshape(B, -1).contiguous(),
+                    "model_action": x0.reshape(B, -1).contiguous(),
+                    **replay,
+                },
                 "model_actions": x0,
             }
 
         if self.joint_logprob:
-            denoise_inds = torch.arange(N, device=device)[None].expand(B, -1).contiguous()
+            denoise_inds = (
+                torch.arange(N, device=device)[None].expand(B, -1).contiguous()
+            )
         else:
             hi = N - 2 if self.ignore_last else N - 1
             chosen = random.randint(0, max(hi, 0))
@@ -247,26 +277,48 @@ class GapFlowRL(nn.Module, BasePolicy):
         log_probs = []
         if self.joint_logprob:
             log_probs.append(
-                rl_sampler.gaussian_logprob(x_t, torch.zeros_like(x_t), torch.ones_like(x_t))
+                rl_sampler.gaussian_logprob(
+                    x_t, torch.zeros_like(x_t), torch.ones_like(x_t)
+                )
             )
         for idx in range(N):
-            method = self.noise_method if idx == int(denoise_inds[0, idx].item()) else "flow_ode"
+            method = (
+                self.noise_method
+                if idx == int(denoise_inds[0, idx].item())
+                else "flow_ode"
+            )
             t = timesteps[idx].expand(B).float()
             v = self._velocity(x_t, t, enc)
             idx_step.fill_(idx)
             mean, std = rl_sampler.sample_mean_var(
-                x_t.float(), v, idx_step, noise_method=method,
-                noise_level=self.noise_level, num_steps=N,
+                x_t.float(),
+                v,
+                idx_step,
+                noise_method=method,
+                noise_level=self.noise_level,
+                num_steps=N,
             )
-            x_next = mean + torch.randn(x_t.shape, device=device, dtype=torch.float32, generator=rng) * std
+            x_next = (
+                mean
+                + torch.randn(
+                    x_t.shape, device=device, dtype=torch.float32, generator=rng
+                )
+                * std
+            )
             log_probs.append(rl_sampler.gaussian_logprob(x_next, mean, std))
             chains.append(x_next)
             x_t = x_next
 
         x0 = x_t
         chains_t = torch.stack(chains, dim=1).contiguous()
-        lp = torch.stack(log_probs, dim=1)[:, :, : self.num_action_chunks, : self.action_dim]
-        lp = lp.mean(dim=1) if self.joint_logprob else lp[torch.arange(B, device=device), denoise_inds[:, 0]]
+        lp = torch.stack(log_probs, dim=1)[
+            :, :, : self.num_action_chunks, : self.action_dim
+        ]
+        lp = (
+            lp.mean(dim=1)
+            if self.joint_logprob
+            else lp[torch.arange(B, device=device), denoise_inds[:, 0]]
+        )
         if compute_values and self.add_value_head:
             prev_values = self._value(chains_t[:, 0], enc)[:, None].contiguous()
         else:
@@ -306,7 +358,8 @@ class GapFlowRL(nn.Module, BasePolicy):
             num_recompute = N
             step_logprobs.append(
                 rl_sampler.gaussian_logprob(
-                    chains[:, 0].float(), torch.zeros_like(chains[:, 0], dtype=torch.float32),
+                    chains[:, 0].float(),
+                    torch.zeros_like(chains[:, 0], dtype=torch.float32),
                     torch.ones_like(chains[:, 0], dtype=torch.float32),
                 )
             )
@@ -319,11 +372,17 @@ class GapFlowRL(nn.Module, BasePolicy):
             nxt = chains[arange_B, di + 1].float()
             v = self._velocity(pre, timesteps[di].float(), enc)
             mean, std = rl_sampler.sample_mean_var(
-                pre, v, di, noise_method=self.noise_method,
-                noise_level=self.noise_level, num_steps=N,
+                pre,
+                v,
+                di,
+                noise_method=self.noise_method,
+                noise_level=self.noise_level,
+                num_steps=N,
             )
             step_logprobs.append(rl_sampler.gaussian_logprob(nxt, mean, std))
-        lp = torch.stack(step_logprobs, dim=1)[:, :, : self.num_action_chunks, : self.action_dim].float()
+        lp = torch.stack(step_logprobs, dim=1)[
+            :, :, : self.num_action_chunks, : self.action_dim
+        ].float()
         lp = lp.mean(dim=1) if self.joint_logprob else lp[:, 0]
         if compute_values and self.add_value_head:
             values = self._value(chains[:, 0].float(), enc)
@@ -339,6 +398,8 @@ class GapFlowRL(nn.Module, BasePolicy):
 def get_model(cfg: DictConfig, torch_dtype=None) -> GapFlowRL:
     model = GapFlowRL(cfg)
     if model.load_report["missing"] or model.load_report["unexpected"]:
-        print(f"[GapFlowRL] load_state_dict: missing={len(model.load_report['missing'])} "
-              f"unexpected={len(model.load_report['unexpected'])}")
+        print(
+            f"[GapFlowRL] load_state_dict: missing={len(model.load_report['missing'])} "
+            f"unexpected={len(model.load_report['unexpected'])}"
+        )
     return model

@@ -50,7 +50,7 @@ class SvmDenseReward:
 
     Args:
         cfg: ``env.<train|eval>.svm_reward`` node (repo_path, ckpt_dir, model, dino_repo_dir,
-            dino_weights, lam, beta, swap_rgb).
+            dino_weights, lam, beta).
         device: torch device for the SVM and DINOv2 (kept outside the env's own tensors).
     """
 
@@ -75,7 +75,6 @@ class SvmDenseReward:
         )
         self.lam = float(cfg.get("lam", 0.1))
         self.beta = float(cfg.get("beta", 20.0))
-        self.swap_rgb = bool(cfg.get("swap_rgb", False))
         self.batch_size = int(cfg.get("batch_size", 8))
 
     @staticmethod
@@ -99,9 +98,7 @@ class SvmDenseReward:
         obs = {}
         for cam in CAMERAS:
             img = rgb[cam]
-            obs[f"{cam}_rgb"] = np.ascontiguousarray(
-                img[..., ::-1] if self.swap_rgb else img
-            )
+            obs[f"{cam}_rgb"] = np.ascontiguousarray(img)
             obs[f"{cam}_depth"] = self._np(extracted_obs[f"{cam}_depth"])
             obs[f"{cam}_K"] = self._np(extracted_obs[f"{cam}_intrinsic"])
             obs[f"{cam}_E"] = self._np(extracted_obs[f"{cam}_extrinsic"])

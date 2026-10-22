@@ -18,7 +18,6 @@ gap_flow:
   joint_logprob: False     # False: one random denoise step is stochastic and carries the log-prob (as pi0 / pi0.5)
   ignore_last: False
   detach_critic_input: True
-  swap_rgb: True           # training features came from channel-swapped images
   use_ema: True
   dino_weights_path: null  # default: <gap_root>/pretrained/dinov2_vitl14_reg4_pretrain.pth
   autocast_bf16: True

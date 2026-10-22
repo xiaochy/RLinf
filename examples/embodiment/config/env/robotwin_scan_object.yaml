@@ -31,7 +31,6 @@ svm_reward:
   beta: 20.0
   coef: 0.2
   offset: -0.29
-  swap_rgb: False
   batch_size: 8
 
 is_eval: False
