@@ -15,6 +15,25 @@ use_fixed_reset_state_ids: False
 max_steps_per_rollout_epoch: 500
 max_episode_steps: 500 # RoboTwin official step limit for scan_object (_eval_step_limit.yml)
 
+# Dense process reward per action chunk, added to the sparse success reward (0 after an env's episode ends):
+#   r = coef * (lam * clip(logit, -beta, beta) - offset)
+# Needs action_type ee, 16-step chunks and wrist cameras with depth. offset is the midpoint of the mean raw reward of
+# successful (-0.146) and failed (-0.433) SFT-policy episodes measured in this env (16 episodes), i.e. the score that
+# neither indicates success nor failure; the SVM README reports +0.14 / -0.31 on its own held-out set. coef is not tuned.
+svm_reward:
+  enabled: False
+  repo_path: /project_data/held/vxiao/Bimanual_Manipulation_Project/SVM-reference
+  ckpt_dir: /project_data/held/vxiao/Bimanual_Manipulation_Project/SVM-reference/checkpoints/mv-action-svm-scan-object
+  model: action
+  dino_repo_dir: /project_data/held/vxiao/Bimanual_Manipulation_Project/GAP-flowmatch-actiononly/thirdparty/dinov2
+  dino_weights: /project_data/held/vxiao/Bimanual_Manipulation_Project/GAP-flowmatch-actiononly/pretrained/dinov2_vitl14_reg4_pretrain.pth
+  lam: 0.1
+  beta: 20.0
+  coef: 0.2
+  offset: -0.29
+  swap_rgb: False
+  batch_size: 8
+
 is_eval: False
 
 assets_path: "/path/to/robotwin_assets"

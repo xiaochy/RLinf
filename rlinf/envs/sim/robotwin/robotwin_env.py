@@ -34,6 +34,20 @@ from rlinf.envs.utils import (
 __all__ = ["RoboTwinEnv"]
 
 
+_EXTRA_OBS_KEYS = (
+    "head_depth",
+    "head_intrinsic",
+    "head_extrinsic",
+    "left_wrist_depth",
+    "left_wrist_intrinsic",
+    "left_wrist_extrinsic",
+    "right_wrist_depth",
+    "right_wrist_intrinsic",
+    "right_wrist_extrinsic",
+    "ee_state",
+)
+
+
 class RoboTwinEnv(gym.Env):
     def __init__(
         self,
@@ -74,6 +88,20 @@ class RoboTwinEnv(gym.Env):
 
         self.center_crop = cfg.get("center_crop", False)
         self._init_reset_state_ids()
+
+        # Optional dense process reward (SVM discriminator), added to the sparse success reward.
+        self.svm_reward = None
+        self._decision_obs = None
+        svm_cfg = cfg.get("svm_reward", None)
+        if svm_cfg is not None and svm_cfg.get("enabled", False):
+            from rlinf.envs.sim.robotwin.svm_dense_reward import SvmDenseReward
+
+            self.svm_reward = SvmDenseReward(svm_cfg, device="cuda")
+            self.svm_coef = float(svm_cfg.get("coef", 1.0))
+            # r_dense = coef * (lam * clip(logit) - offset); offset recentres the SVM score (see env yaml).
+            self.svm_offset = float(svm_cfg.get("offset", 0.0))
+            # False once an env's episode has ended: later chunks of that env get no dense reward.
+            self._svm_alive = torch.ones(self.num_envs, dtype=torch.bool)
 
         self._init_env()
 
@@ -207,7 +235,7 @@ class RoboTwinEnv(gym.Env):
 
         # Optional extras (see update_obs in robotwin/envs/vector_env.py); only when enabled.
         extra_obs = {}
-        for key in ("head_depth", "head_intrinsic", "head_extrinsic", "ee_state"):
+        for key in _EXTRA_OBS_KEYS:
             if all(key in obs for obs in raw_obs):
                 extra_obs[key] = torch.stack(
                     [torch.from_numpy(np.asarray(obs[key])) for obs in raw_obs]
@@ -273,6 +301,14 @@ class RoboTwinEnv(gym.Env):
         self._reset_metrics(env_idx)
 
         extracted_obs = self._extract_obs_image(raw_obs)
+        self._decision_obs = extracted_obs
+        if self.svm_reward is not None:
+            if env_idx is None:
+                self._svm_alive[:] = True
+            else:
+                self._svm_alive[
+                    torch.as_tensor(env_idx, dtype=torch.long).reshape(-1)
+                ] = True
 
         self._reset_count += 1
         trim_interval = self.cfg.get("malloc_trim_reset_interval", 0)
@@ -352,6 +388,11 @@ class RoboTwinEnv(gym.Env):
         obs_list = []
         infos_list = []
 
+        svm_rewards = None
+        if self.svm_reward is not None:
+            # Score the decision-time observation together with the chunk about to be executed.
+            svm_rewards = self.svm_reward(self._decision_obs, chunk_actions)
+
         if not self.skip_intermediate_renders:
             raw_obs_list, step_reward, terminations, truncations, info_list = (
                 self.venv.step_with_full_obs(chunk_actions)
@@ -393,11 +434,23 @@ class RoboTwinEnv(gym.Env):
         chunk_rewards = self._cal_chunk_rewards(
             step_reward, chunk_step, terminations, infos
         )
+        svm_dense = None
+        if svm_rewards is not None:
+            alive = self._svm_alive.to(chunk_rewards.device)
+            svm_dense = (
+                self.svm_coef
+                * (svm_rewards.to(chunk_rewards.device) - self.svm_offset)
+                * alive
+            )
+            chunk_rewards[:, -1] += svm_dense
 
         self._elapsed_steps += chunk_actions.shape[1]
         truncated = self._elapsed_steps >= self.cfg.max_episode_steps
         if truncated.any():
             truncations = torch.logical_or(truncated, truncations)
+        if svm_rewards is not None:
+            ended = torch.logical_or(terminations, truncations).cpu()
+            self._svm_alive &= ~ended
 
         infos = self._record_metrics(step_reward, infos)
 
@@ -412,6 +465,11 @@ class RoboTwinEnv(gym.Env):
             obs_list[-1], infos_list[-1] = self._handle_auto_reset(
                 past_dones, obs_list[-1], infos_list[-1]
             )
+
+        self._decision_obs = obs_list[-1]
+        if svm_rewards is not None:
+            infos_list[-1]["svm_reward"] = svm_rewards.clone()
+            infos_list[-1]["svm_dense_reward"] = svm_dense.detach().cpu()
 
         chunk_terminations = torch.zeros((num_envs, chunk_step), dtype=bool)
         chunk_terminations[:, -1] = terminations
