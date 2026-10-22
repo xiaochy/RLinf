@@ -1696,13 +1696,19 @@ class EnvOutput:
             else None
         )
 
-        return {
+        prepared = {
             "main_images": image_tensor,  # [N_ENV, H, W, C]
             "wrist_images": wrist_image_tensor,  # [N_ENV, H, W, C] or [N_ENV, N_IMG, H, W, C]
             "extra_view_images": extra_view_image_tensor,  # [N_ENV, N_IMG, H, W, C]
             "states": states,
             "task_descriptions": task_descriptions,
         }
+        # Optional RoboTwin extras (head depth + camera params, 16-d EE state); present only when
+        # the task config enables depth / endpose, so other envs are unaffected.
+        for key in ("head_depth", "head_intrinsic", "head_extrinsic", "ee_state"):
+            if key in obs and obs[key] is not None:
+                prepared[key] = obs[key]
+        return prepared
 
     def to_dict(self) -> dict[str, Any]:
         return {

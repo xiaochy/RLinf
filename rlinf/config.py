@@ -132,6 +132,7 @@ SupportedModel.DEEPSEEK_V3 = SupportedModel.register("deepseek_v3", force=True)
 SupportedModel.GLM4_MOE_LITE = SupportedModel.register("glm4_moe_lite", force=True)
 SupportedModel.GR00T_N1D7 = SupportedModel.register("gr00t_n1d7", force=True)
 SupportedModel.EVO1 = SupportedModel.register("evo1", force=True)
+SupportedModel.GAP_FLOW = SupportedModel.register("gap_flow", force=True)
 
 DIFFUSION_MODELS = {SupportedModel.SD3, SupportedModel.WAN22_TI2V_5B}
 

@@ -1,0 +1,24 @@
+model_type: "gap_flow"
+
+# GAP action-only flow-matching policy (see rlinf/models/embodiment/gap_flow). Experiment YAMLs override model_path.
+precision: "fp32"   # the policy runs bf16 autocast internally (gap_flow.autocast_bf16)
+is_lora: False
+model_path: null    # GAP training checkpoint (.ckpt from scripts/train.py with generative_mode=flow_matching)
+
+num_action_chunks: 16   # = GAP n_action_steps (all executed by the env)
+action_dim: 16          # [L pose7 (xyz+quat wxyz), L grip, R pose7, R grip], world frame -> env action_type: ee
+use_proprio: True
+add_value_head: True
+
+gap_flow:
+  gap_root: /project_data/held/vxiao/Bimanual_Manipulation_Project/GAP-flowmatch-actiononly
+  num_steps: 10            # Euler / SDE denoising steps
+  noise_method: "flow_sde"
+  noise_level: 0.3         # starting value borrowed from pi0.5; exploration noise must be re-tuned for this model
+  joint_logprob: False     # False: one random denoise step is stochastic and carries the log-prob (as pi0 / pi0.5)
+  ignore_last: False
+  detach_critic_input: True
+  swap_rgb: True           # training features came from channel-swapped images
+  use_ema: True
+  dino_weights_path: null  # default: <gap_root>/pretrained/dinov2_vitl14_reg4_pretrain.pth
+  autocast_bf16: True
