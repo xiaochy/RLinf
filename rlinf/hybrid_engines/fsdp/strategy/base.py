@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, ContextManager, Optional, Union
 import torch
 import torch.nn as nn
 from omegaconf import DictConfig
+from torch.distributed.checkpoint import DefaultLoadPlanner
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
     get_model_state_dict,
@@ -41,6 +42,25 @@ from rlinf.utils.utils import clear_memory
 if TYPE_CHECKING:
     from rlinf.workers.actor.fsdp_actor_worker import FSDPActor
     from rlinf.workers.inference.fsdp_inference_worker import FSDPInference
+
+
+class _DummyVariableTolerantLoadPlanner(DefaultLoadPlanner):
+    """Load planner that accepts checkpoints lacking only ``_dummy_variable`` entries."""
+
+    def __init__(self):
+        super().__init__(allow_partial_load=True)
+
+    def create_local_plan(self):
+        missing = [
+            k for k in self.state_dict if k not in self.metadata.state_dict_metadata
+        ]
+        unexpected = [k for k in missing if "_dummy_variable" not in k]
+        if unexpected:
+            raise RuntimeError(
+                f"Missing keys in checkpoint state_dict: {unexpected[:5]}"
+                f" ({len(unexpected)} in total)."
+            )
+        return super().create_local_plan()
 
 
 class FSDPStrategyBase(ABC):
@@ -351,10 +371,26 @@ class FSDPStrategyBase(ABC):
                 training_state.legacy_rng_state = (
                     "fsdp_checkpoint.rng" not in metadata.state_dict_metadata
                 )
-                dcp.load(
-                    {"fsdp_checkpoint": training_state},
-                    storage_reader=storage_reader,
-                )
+                try:
+                    dcp.load(
+                        {"fsdp_checkpoint": training_state},
+                        storage_reader=storage_reader,
+                    )
+                except BaseException as load_err:  # CheckpointException is not an Exception
+                    if isinstance(load_err, (KeyboardInterrupt, SystemExit)):
+                        raise
+                    # A checkpoint written by an already-resumed run lacks the optimizer state of
+                    # the empty ``_dummy_variable`` parameter; any other missing key still fails.
+                    if hasattr(cls, "logger") and cls.logger is not None:
+                        cls.logger.warning(
+                            "[Checkpoint] strict load failed, retrying and tolerating "
+                            "only missing '_dummy_variable' entries"
+                        )
+                    dcp.load(
+                        {"fsdp_checkpoint": training_state},
+                        storage_reader=dcp.FileSystemReader(dcp_load_path),
+                        planner=_DummyVariableTolerantLoadPlanner(),
+                    )
         except BaseException as e:
             import traceback
 
