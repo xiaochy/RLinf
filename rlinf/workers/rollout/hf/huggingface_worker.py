@@ -967,7 +967,10 @@ class MultiStepRolloutWorker(Worker):
                 )
         else:
             for _ in tqdm(
-                range(self.eval_rollout_epoch),
+                range(
+                    self.eval_rollout_epoch
+                    - int(self.cfg.env.eval.get("start_round", 0))
+                ),
                 desc="Evaluating Rollout Epochs",
                 disable=(self._rank != 0),
             ):

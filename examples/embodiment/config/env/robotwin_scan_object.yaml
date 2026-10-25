@@ -34,6 +34,7 @@ svm_reward:
   batch_size: 8
 
 is_eval: False
+start_round: 0 # eval only: skip the first N rounds (resume a partial eval; see eval_progress.jsonl)
 
 assets_path: "/path/to/robotwin_assets"
 seeds_path: ${oc.env:REPO_PATH}/rlinf/envs/sim/robotwin/seeds/scan_object_train_seeds.json

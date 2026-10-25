@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+import os
 from collections import defaultdict
 from typing import Any
 
@@ -1242,10 +1243,43 @@ class EnvWorker(Worker):
         return env_metrics
 
     @Worker.timer("evaluate")
+    def _record_eval_round(self, round_idx: int, eval_metrics, seeds) -> None:
+        """Append the seeds and metrics of the round just finished to ``eval_progress.jsonl``."""
+        if self._rank != 0:
+            return
+        import json
+
+        offsets = self.__dict__.setdefault("_eval_record_offsets", {})
+        record = {
+            "round": round_idx,
+            "num_rounds": self.eval_rollout_epoch,
+            "seeds": seeds,
+        }
+        for key in ("success_once", "success_at_end", "return", "episode_len"):
+            values = eval_metrics.get(key)
+            if not values:
+                continue
+            new = values[offsets.get(key, 0) :]
+            offsets[key] = len(values)
+            if new:
+                record[key] = [
+                    round(v, 4) for v in torch.cat(new, dim=0).float().cpu().tolist()
+                ]
+        path = os.path.join(str(self.cfg.runner.logger.log_path), "eval_progress.jsonl")
+        with open(path, "a") as f:
+            f.write(json.dumps(record) + "\n")
+
     def evaluate(self, input_channel: Channel, rollout_channel: Channel):
         eval_metrics = defaultdict(list)
-        for eval_rollout_epoch in range(self.eval_rollout_epoch):
-            if not self.cfg.env.eval.auto_reset or eval_rollout_epoch == 0:
+        # Rounds before ``start_round`` are skipped (already recorded in an earlier run's eval_progress.jsonl).
+        start_round = int(self.cfg.env.eval.get("start_round", 0))
+        if start_round > 0:
+            for stage_id in range(self.stage_num):
+                get_env_attr(self.eval_env_list[stage_id], "skip_to_eval_round")(
+                    start_round
+                )
+        for eval_rollout_epoch in range(start_round, self.eval_rollout_epoch):
+            if not self.cfg.env.eval.auto_reset or eval_rollout_epoch == start_round:
                 for stage_id in range(self.stage_num):
                     self.eval_env_list[stage_id].is_start = True
                     self.eval_prev_done[stage_id] = torch.zeros(
@@ -1273,6 +1307,12 @@ class EnvWorker(Worker):
                         decoupled_mode=self.env_decoupled_mode,
                     )
 
+            round_seeds = [
+                get_env_attr(self.eval_env_list[stage_id], "reset_state_ids")
+                .cpu()
+                .tolist()
+                for stage_id in range(self.stage_num)
+            ]
             for eval_step in range(self.n_eval_chunk_steps):
                 for stage_id in range(self.stage_num):
                     policy_output = self.recv_from(
@@ -1324,6 +1364,7 @@ class EnvWorker(Worker):
                     )
 
             self.finish_rollout(mode="eval")
+            self._record_eval_round(eval_rollout_epoch, eval_metrics, round_seeds)
         for stage_id in range(self.stage_num):
             if self.eval_enable_offload:
                 get_env_attr(self.eval_env_list[stage_id], "offload")()

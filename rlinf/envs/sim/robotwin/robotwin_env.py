@@ -598,6 +598,15 @@ class RoboTwinEnv(gym.Env):
                 )
             self.reset_state_ids = reset_state_ids
 
+    def skip_to_eval_round(self, round_idx: int) -> None:
+        """Position the seed cursor where eval round ``round_idx`` starts (resume of a partial eval)."""
+        if self.success_seeds is None:
+            return
+        self._current_seed_index = (
+            round_idx * self.num_group
+        ) % self.success_seeds.numel()
+        self.update_reset_state_ids()
+
     def check_seeds(self, seeds):
         resutls = self.venv.check_seeds(seeds)
 
