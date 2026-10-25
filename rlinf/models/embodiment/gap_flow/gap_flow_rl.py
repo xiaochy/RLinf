@@ -63,6 +63,8 @@ class GapFlowRL(nn.Module, BasePolicy):
         self.use_ema = bool(gf.get("use_ema", True))
         self.dino_weights_path = gf.get("dino_weights_path", None)
         self.autocast_bf16 = bool(gf.get("autocast_bf16", True))
+        # Keep the checkpoint's config and normalizer but leave the policy weights at their random init.
+        self.random_init = bool(gf.get("random_init", False))
 
         if self.gap_root not in sys.path:
             sys.path.insert(0, self.gap_root)
@@ -78,9 +80,12 @@ class GapFlowRL(nn.Module, BasePolicy):
         )
         self.policy = hydra.utils.instantiate(gcfg.policy)
         self.policy.set_normalizer(_StateDictHolder(ckpt["normalizer"]))
-        weights = ckpt["ema"] if (self.use_ema and "ema" in ckpt) else ckpt["model"]
-        missing, unexpected = self.policy.load_state_dict(weights, strict=False)
-        self.load_report = {"missing": list(missing), "unexpected": list(unexpected)}
+        if self.random_init:
+            self.load_report = {"missing": [], "unexpected": []}
+        else:
+            weights = ckpt["ema"] if (self.use_ema and "ema" in ckpt) else ckpt["model"]
+            missing, unexpected = self.policy.load_state_dict(weights, strict=False)
+            self.load_report = {"missing": list(missing), "unexpected": list(unexpected)}
 
         self.horizon = int(self.policy.horizon)
         self.action_dim = int(self.policy.action_dim)
