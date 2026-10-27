@@ -150,17 +150,12 @@ class StudentDenseReward:
         actions = np.asarray(chunk_actions, dtype=np.float32)
         B = len(obs["state"])
         head_dino = self.pp.dino_features(self.student.dino, obs["head_rgb"], self.device).cpu().numpy()
-        # The dynamics model was trained on DINO features of channel-swapped images (the GAP pipelines' spurious
-        # BGR2RGB, see GAP-tte deploy_policy.swap_rgb_channels); the student / SVM read true-RGB features.
-        head_dino_dyn = self.pp.dino_features(
-            self.student.dino, np.ascontiguousarray(obs["head_rgb"][..., ::-1]), self.device
-        ).cpu().numpy()
         centres = np.zeros((B, 391, 3), np.float32)
         valid = np.zeros((B, 391), bool)
         for b in range(B):
             centres[b], ok = self.pp.patch_centres(obs["head_depth"][b], obs["head_K"][b], obs["head_E"][b])
             valid[b] = object_patch_mask(task_envs[b], self.pp.PATCH_PX, ok)
-        obs["track"] = self.tracker.predict(head_dino_dyn, obs["state"], centres, actions)[:, :, :16].astype(np.float32)
+        obs["track"] = self.tracker.predict(head_dino, obs["state"], centres, actions)[:, :, :16].astype(np.float32)
         obs["track_valid"] = valid
         v, v0 = self.student.values(obs, head_dino=head_dino, chunk=self.batch_size)
         return torch.as_tensor(np.clip(v - v0, -self.clip, self.clip), dtype=torch.float32)
