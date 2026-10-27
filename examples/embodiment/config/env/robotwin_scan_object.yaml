@@ -89,3 +89,20 @@ task_config:
   clear_cache_freq: 1
   collect_data: true
   eval_video_log: true
+
+# Alternative dense reward: the track-conditioned student (SVM-cotrain-student). The chunk's track comes from the
+# action-conditioned dynamics model (subprocess); r = coef * clip(V(s, track) - V(s, 0), -clip, clip) in teacher-logit
+# units, added to the sparse reward. coef is not tuned: 0.05 puts a chunk with a typical |r| of ~0.5 at ~0.025, the
+# size of the action-SVM reward above. Enable one of svm_reward / student_reward.
+student_reward:
+  enabled: False
+  student_repo: /project_data/held/vxiao/Bimanual_Manipulation_Project/SVM-cotrain-student
+  svm_repo: /project_data/held/vxiao/Bimanual_Manipulation_Project/SVM-reference
+  student_ckpt: /project_data/held/vxiao/Bimanual_Manipulation_Project/SVM-cotrain-student/checkpoints/student/student.pt
+  dynamics_ckpt: /project_data/held/vxiao/Bimanual_Manipulation_Project/dynamics-model-rollout-worldmodel/data/outputs/2026.09.28/19.53.05_GAP_scan_object_rollout-worldmodel/checkpoints/200.ckpt
+  worker_python: /project_data/held/vxiao/app/anaconda3/envs/RoboTwin/bin/python
+  dino_repo_dir: /project_data/held/vxiao/Bimanual_Manipulation_Project/GAP-flowmatch-actiononly/thirdparty/dinov2
+  dino_weights: /project_data/held/vxiao/Bimanual_Manipulation_Project/GAP-flowmatch-actiononly/pretrained/dinov2_vitl14_reg4_pretrain.pth
+  coef: 0.05
+  clip: 5.0
+  batch_size: 4

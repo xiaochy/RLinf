@@ -103,6 +103,19 @@ class RoboTwinEnv(gym.Env):
             # False once an env's episode has ended: later chunks of that env get no dense reward.
             self._svm_alive = torch.ones(self.num_envs, dtype=torch.bool)
 
+        # Alternative dense reward: track-conditioned student V(s, track) - V(s, 0). Reuses the svm_reward slots.
+        self._student_reward = False
+        student_cfg = cfg.get("student_reward", None)
+        if student_cfg is not None and student_cfg.get("enabled", False):
+            assert self.svm_reward is None, "enable either svm_reward or student_reward"
+            from rlinf.envs.sim.robotwin.student_dense_reward import StudentDenseReward
+
+            self.svm_reward = StudentDenseReward(student_cfg, device="cuda")
+            self._student_reward = True
+            self.svm_coef = float(student_cfg.get("coef", 1.0))
+            self.svm_offset = 0.0
+            self._svm_alive = torch.ones(self.num_envs, dtype=torch.bool)
+
         self._init_env()
 
         self.prev_step_reward = torch.zeros(
@@ -391,7 +404,12 @@ class RoboTwinEnv(gym.Env):
         svm_rewards = None
         if self.svm_reward is not None:
             # Score the decision-time observation together with the chunk about to be executed.
-            svm_rewards = self.svm_reward(self._decision_obs, chunk_actions)
+            if self._student_reward:
+                svm_rewards = self.svm_reward(
+                    self._decision_obs, chunk_actions, [e.task for e in self.venv.envs]
+                )
+            else:
+                svm_rewards = self.svm_reward(self._decision_obs, chunk_actions)
 
         if not self.skip_intermediate_renders:
             raw_obs_list, step_reward, terminations, truncations, info_list = (
