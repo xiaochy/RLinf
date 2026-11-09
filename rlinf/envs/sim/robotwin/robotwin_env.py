@@ -322,6 +322,9 @@ class RoboTwinEnv(gym.Env):
                 self._svm_alive[
                     torch.as_tensor(env_idx, dtype=torch.long).reshape(-1)
                 ] = True
+            if self._student_reward:
+                # A reset rebuilds the scene, so the recorded body handles are stale.
+                self.svm_reward.on_reset([e.task for e in self.venv.envs])
 
         self._reset_count += 1
         trim_interval = self.cfg.get("malloc_trim_reset_interval", 0)
@@ -402,10 +405,13 @@ class RoboTwinEnv(gym.Env):
         infos_list = []
 
         svm_rewards = None
+        chunk_state = None
         if self.svm_reward is not None:
-            # Score the decision-time observation together with the chunk about to be executed.
+            # Score the decision-time observation together with the chunk about to be executed. The
+            # student snapshots here and scores in finish_chunk below, because a ground-truth track is
+            # only readable once the chunk has run.
             if self._student_reward:
-                svm_rewards = self.svm_reward(
+                chunk_state = self.svm_reward.begin_chunk(
                     self._decision_obs, chunk_actions, [e.task for e in self.venv.envs]
                 )
             else:
@@ -423,6 +429,11 @@ class RoboTwinEnv(gym.Env):
             )
             obs_list.append(self._extract_obs_image(raw_obs))
             infos_list.append({})
+
+        if chunk_state is not None:
+            svm_rewards = self.svm_reward.finish_chunk(
+                chunk_state, [e.task for e in self.venv.envs]
+            )
 
         infos = list_of_dict_to_dict_of_list(info_list)
         infos_list[-1] = infos

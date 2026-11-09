@@ -101,6 +101,8 @@ student_reward:
   student_ckpt: /project_data/held/vxiao/Bimanual_Manipulation_Project/SVM-cotrain-student/checkpoints/student/student.pt
   dynamics_ckpt: /project_data/held/vxiao/Bimanual_Manipulation_Project/dynamics-model-rollout-worldmodel/data/outputs/2026.09.28/19.53.05_GAP_scan_object_rollout-worldmodel/checkpoints/200.ckpt
   worker_python: /project_data/held/vxiao/app/anaconda3/envs/RoboTwin/bin/python
+  track_source: dynamics   # dynamics: dynamics model predicts the chunk's track; env: simulator ground truth, read back after the chunk ran
+  horizon: 16              # track length the student reads; must equal num_action_chunks
   dino_repo_dir: /project_data/held/vxiao/Bimanual_Manipulation_Project/GAP-flowmatch-actiononly/thirdparty/dinov2
   dino_weights: /project_data/held/vxiao/Bimanual_Manipulation_Project/GAP-flowmatch-actiononly/pretrained/dinov2_vitl14_reg4_pretrain.pth
   coef: 0.05

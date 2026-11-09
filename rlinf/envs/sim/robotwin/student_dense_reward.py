@@ -13,10 +13,21 @@
 # limitations under the License.
 """Dense reward from the track-conditioned student (SVM-cotrain-student, mv_distill).
 
-Per policy decision, for every env: the action chunk about to be executed -> track of the head-camera patches
-(action-conditioned dynamics model, subprocess) -> student progress r = V(s, track) - V(s, 0). The reward is
-``coef * clip(r, -clip, clip)`` and is added on top of the sparse success reward by ``RoboTwinEnv.chunk_step``.
-Replaces ``SvmDenseReward`` (action SVM); the observation keys the env must expose are the same.
+Per policy decision, for every env: the chunk's track of the head-camera patches -> student progress
+r = V(s, track) - V(s, 0). The reward is ``coef * clip(r, -clip, clip)`` and is added on top of the sparse
+success reward by ``RoboTwinEnv.chunk_step``. Replaces ``SvmDenseReward`` (action SVM); the observation keys
+the env must expose are the same.
+
+``track_source`` picks where the track comes from:
+
+- ``dynamics``: predicted from the chunk by the action-conditioned dynamics model in a subprocess. Known
+  before the chunk runs, which is what the student was designed for, but predicted tracks are a
+  distribution shift away from the simulator ground truth it was trained on.
+- ``env``: the simulator's own ground truth, read back after the chunk has run (see ``gt_track``). In
+  distribution, and free of the dynamics model's error, at the cost of scoring the chunk after the fact.
+
+Either way the score is a function of the decision-time observation and the chunk, so the reward PPO sees
+is still r(s_t, a_t); only ``env`` has to wait for the chunk to finish before it can be computed.
 """
 
 import pickle
@@ -27,9 +38,13 @@ import sys
 import numpy as np
 import torch
 
+from rlinf.utils.logging import get_logger
+
+from rlinf.envs.sim.robotwin.gt_track import PoseRecorder
 from rlinf.envs.sim.robotwin.svm_dense_reward import CAMERAS, OBS_KEYS, load_local_dino
 
 _BACKGROUND = {"table", "wall", "ground"}
+_logger = get_logger()
 
 
 def _gripper_joint_names(robot):
@@ -120,9 +135,19 @@ class StudentDenseReward:
         self.pp = preprocess
         dino = load_local_dino(str(cfg.dino_repo_dir), str(cfg.dino_weights), self.device)
         self.student = MVStudentReward(str(cfg.student_ckpt), device=str(self.device), dino=dino)
-        self.tracker = TrackClient(str(cfg.worker_python), str(cfg.dynamics_ckpt), str(self.device))
+        self.track_source = str(cfg.get("track_source", "dynamics"))
+        if self.track_source not in ("dynamics", "env"):
+            raise ValueError(f"student_reward.track_source must be 'dynamics' or 'env', got {self.track_source!r}")
+        self.tracker = (
+            TrackClient(str(cfg.worker_python), str(cfg.dynamics_ckpt), str(self.device))
+            if self.track_source == "dynamics"
+            else None
+        )
+        self.horizon = int(cfg.get("horizon", 16))
         self.clip = float(cfg.get("clip", 5.0))
         self.batch_size = int(cfg.get("batch_size", 4))
+        self._recorders = {}
+        self._chunks_scored = 0
 
     @staticmethod
     def _np(x):
@@ -143,19 +168,79 @@ class StudentDenseReward:
         obs["state"] = self._np(extracted_obs["ee_state"])
         return obs
 
+    def _recorder(self, task_env) -> PoseRecorder:
+        rec = self._recorders.get(id(task_env))
+        if rec is None:
+            rec = PoseRecorder(task_env)
+            self._recorders[id(task_env)] = rec
+        return rec
+
+    def on_reset(self, task_envs) -> None:
+        """Re-read the trackable bodies of every env; a reset rebuilds the scene and invalidates them."""
+        if self.track_source != "env":
+            return
+        for te in task_envs:
+            self._recorder(te).refresh()
+
     @torch.no_grad()
-    def __call__(self, extracted_obs: dict, chunk_actions: np.ndarray, task_envs) -> torch.Tensor:
-        """[num_envs] progress rewards for one chunk step (before it is executed); ``task_envs`` are the live task envs."""
+    def begin_chunk(self, extracted_obs: dict, chunk_actions: np.ndarray, task_envs) -> dict:
+        """Snapshot what the chunk will be scored against, before it is executed."""
         obs = self._obs(extracted_obs)
-        actions = np.asarray(chunk_actions, dtype=np.float32)
         B = len(obs["state"])
-        head_dino = self.pp.dino_features(self.student.dino, obs["head_rgb"], self.device).cpu().numpy()
         centres = np.zeros((B, 391, 3), np.float32)
         valid = np.zeros((B, 391), bool)
+        rows = np.zeros((B, 391), np.int64)
         for b in range(B):
             centres[b], ok = self.pp.patch_centres(obs["head_depth"][b], obs["head_K"][b], obs["head_E"][b])
-            valid[b] = object_patch_mask(task_envs[b], self.pp.PATCH_PX, ok)
-        obs["track"] = self.tracker.predict(head_dino, obs["state"], centres, actions)[:, :, :16].astype(np.float32)
+            if self.track_source == "env":
+                rec = self._recorder(task_envs[b])
+                rows[b], valid[b] = rec.owner_rows(self.pp.PATCH_PX, ok)
+                rec.start_chunk()
+            else:
+                valid[b] = object_patch_mask(task_envs[b], self.pp.PATCH_PX, ok)
+        return {
+            "obs": obs,
+            "actions": np.asarray(chunk_actions, dtype=np.float32),
+            "centres": centres,
+            "valid": valid,
+            "owner_rows": rows,
+        }
+
+    @torch.no_grad()
+    def finish_chunk(self, state: dict, task_envs) -> torch.Tensor:
+        """[num_envs] progress rewards for the chunk ``begin_chunk`` snapshotted."""
+        obs, H = state["obs"], self.horizon
+        B = len(obs["state"])
+        head_dino = self.pp.dino_features(self.student.dino, obs["head_rgb"], self.device).cpu().numpy()
+
+        if self.track_source == "env":
+            track = np.zeros((B, 391, H, 3), np.float32)
+            valid = np.zeros((B, 391), bool)
+            for b in range(B):
+                track[b], valid[b] = self._recorder(task_envs[b]).gt_track(
+                    state["centres"][b], state["owner_rows"][b], state["valid"][b], H
+                )
+        else:
+            track = self.tracker.predict(
+                head_dino, obs["state"], state["centres"], state["actions"]
+            )[:, :, :H].astype(np.float32)
+            valid = state["valid"]
+
+        obs["track"] = track
         obs["track_valid"] = valid
         v, v0 = self.student.values(obs, head_dino=head_dino, chunk=self.batch_size)
-        return torch.as_tensor(np.clip(v - v0, -self.clip, self.clip), dtype=torch.float32)
+        r = np.clip(v - v0, -self.clip, self.clip)
+
+        # An all-invalid mask or an all-zero track silently turns the dense reward into a constant, so
+        # report both for the first few chunks and then periodically.
+        self._chunks_scored += 1
+        if self._chunks_scored <= 5 or self._chunks_scored % 100 == 0:
+            moved = np.abs(track[..., -1, :]).sum(-1) > 1e-4
+            _logger.info(
+                "student_reward[%s] chunk %d: valid %.1f%% of patches, moved %.1f%%, "
+                "|track| max %.4f m, V %.3f..%.3f, V0 %.3f..%.3f, r %.3f..%.3f",
+                self.track_source, self._chunks_scored, 100 * valid.mean(), 100 * moved.mean(),
+                float(np.abs(track).max()), float(v.min()), float(v.max()),
+                float(v0.min()), float(v0.max()), float(r.min()), float(r.max()),
+            )
+        return torch.as_tensor(r, dtype=torch.float32)
