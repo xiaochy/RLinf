@@ -6,6 +6,11 @@
 #
 #   bash train_student_env_track_local.sh n30|n100 <accelerator_rank>
 #
+# REWARD=sparse runs the matched sparse-only control instead: the same base, train seeds, noise_level,
+# lr and 40 steps, with env.train.student_reward.enabled False. The 2026-10-31 sparse arms trained on
+# scan_object_train_seeds.json (band 1-362) while the student arms trained on the heldout band, so
+# sparse-vs-dense there confounded the reward with the training scenes; this control does not.
+#
 # <accelerator_rank> is the GPU this run gets, as cluster.component_placement. Exporting
 # CUDA_VISIBLE_DEVICES does NOT work: RLinf hands each worker the GPUs its placement assigns and
 # overwrites CUDA_VISIBLE_DEVICES with an index counted from the full device list, so a run started
@@ -16,6 +21,12 @@ set -uo pipefail
 
 WHICH=${1:?usage: $0 n30|n100 <accelerator_rank>}
 RANK=${2:?usage: $0 n30|n100 <accelerator_rank>}
+REWARD=${REWARD:-student}
+case "$REWARD" in
+  student) BASE_CONFIG=robotwin_scan_object_ppo_gap_flow_student_env_${WHICH}L0p5 ;;
+  sparse)  BASE_CONFIG=robotwin_scan_object_ppo_gap_flow_sparse_heldoutseeds_${WHICH}L0p5 ;;
+  *) echo "REWARD must be student or sparse, got $REWARD"; exit 2 ;;
+esac
 
 W=/data/vxiao/bimanual_manipulation/RLinf-student-track
 E=/data/vxiao/bimanual_manipulation/RLinf-eval
@@ -42,11 +53,10 @@ export PYTHONPATH=$E/curobo07b:$REPO_PATH:$E:$ROBOTWIN_PATH:${PYTHONPATH:-}
 export RAY_raylet_start_wait_time_s=900
 export RAY_worker_register_timeout_seconds=3600
 export RAY_ADDRESS=local
-export RAY_TMPDIR=/tmp/ray_student_env_${WHICH}_r${RANK}
+export RAY_TMPDIR=/tmp/ray_${REWARD}_env_${WHICH}_r${RANK}
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 mkdir -p "$RAY_TMPDIR"
 
-BASE_CONFIG=robotwin_scan_object_ppo_gap_flow_student_env_${WHICH}L0p5
 CONFIG=${BASE_CONFIG}__rank${RANK}
 CFG_DIR=$EMBODIED_PATH/config
 sed -E "s/^(    actor, env, rollout: )0-0$/\1${RANK}-${RANK}/" \
@@ -62,7 +72,10 @@ case "$WHICH" in
   *) echo "first argument must be n30 or n100, got $WHICH"; exit 2 ;;
 esac
 
-LOG_ROOT=$W/ppo_student_env_runs
+case "$REWARD" in
+  student) LOG_ROOT=$W/ppo_student_env_runs ;;
+  sparse)  LOG_ROOT=$W/ppo_sparse_heldoutseeds_runs ;;
+esac
 SUMMARY=$LOG_ROOT/summary_${WHICH}.log
 MAX_STEP=40
 mkdir -p "$LOG_ROOT"
