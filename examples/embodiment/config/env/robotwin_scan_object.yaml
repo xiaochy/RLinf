@@ -102,6 +102,8 @@ student_reward:
   dynamics_ckpt: /project_data/held/vxiao/Bimanual_Manipulation_Project/dynamics-model-rollout-worldmodel/data/outputs/2026.09.28/19.53.05_GAP_scan_object_rollout-worldmodel/checkpoints/200.ckpt
   worker_python: /project_data/held/vxiao/app/anaconda3/envs/RoboTwin/bin/python
   track_source: dynamics   # dynamics: dynamics model predicts the chunk's track; env: simulator ground truth, read back after the chunk ran
+  reward_mode: raw         # raw: r = V(s, track), the teacher logit 16 frames ahead the student was trained to predict (one forward pass)
+                           # progress: r = V(s, track) - V(s, 0); the zero-track baseline is out of distribution, kept only to reproduce runs before 2026-11-13
   horizon: 16              # track length the student reads; must equal num_action_chunks
   dino_repo_dir: /project_data/held/vxiao/Bimanual_Manipulation_Project/GAP-flowmatch-actiononly/thirdparty/dinov2
   dino_weights: /project_data/held/vxiao/Bimanual_Manipulation_Project/GAP-flowmatch-actiononly/pretrained/dinov2_vitl14_reg4_pretrain.pth

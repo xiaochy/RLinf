@@ -13,9 +13,24 @@
 # limitations under the License.
 """Dense reward from the track-conditioned student (SVM-cotrain-student, mv_distill).
 
-Per policy decision, for every env: the chunk's track of the head-camera patches -> student progress
-r = V(s, track) - V(s, 0). The reward is ``coef * clip(r, -clip, clip)`` and is added on top of the sparse
-success reward by ``RoboTwinEnv.chunk_step``. Replaces ``SvmDenseReward`` (action SVM); the observation keys
+Per policy decision, for every env: the chunk's track of the head-camera patches -> student value.
+The reward is ``coef * clip(r, -clip, clip)`` and is added on top of the sparse success reward by
+``RoboTwinEnv.chunk_step``.
+
+``reward_mode`` picks what ``r`` is:
+
+- ``raw`` (default): ``r = V(s, track)``. The student predicts its task teacher's logit 16 frames
+  ahead, so this IS a value of the state the chunk leads to -- a dense value-based reward, and the
+  thing the student was trained to output. One forward pass.
+- ``progress``: ``r = V(s, track) - V(s, 0)``, the original form. It was meant to isolate the track's
+  contribution by subtracting a track-free baseline, but a zero track never occurs in training (only
+  ``valid`` is kept, as in training), so ``V(s, 0)`` is an out-of-distribution extrapolation and the
+  subtraction injects whatever the model does off-distribution. Kept so every number recorded before
+  2026-11-13 reproduces. Costs a second forward pass.
+
+With ``raw`` the reward carries a large state-dependent offset, which is deliberate: PPO's critic
+absorbs the part that depends on s_t and the advantage keeps the part that depends on the chunk.
+Subtracting a hand-built baseline is the alternative, and ``progress`` is that alternative measured. Replaces ``SvmDenseReward`` (action SVM); the observation keys
 the env must expose are the same.
 
 ``track_source`` picks where the track comes from:
@@ -143,6 +158,9 @@ class StudentDenseReward:
             if self.track_source == "dynamics"
             else None
         )
+        self.reward_mode = str(cfg.get("reward_mode", "raw"))
+        if self.reward_mode not in ("raw", "progress"):
+            raise ValueError(f"student_reward.reward_mode must be 'raw' or 'progress', got {self.reward_mode!r}")
         self.horizon = int(cfg.get("horizon", 16))
         self.clip = float(cfg.get("clip", 5.0))
         self.batch_size = int(cfg.get("batch_size", 4))
@@ -228,8 +246,9 @@ class StudentDenseReward:
 
         obs["track"] = track
         obs["track_valid"] = valid
-        v, v0 = self.student.values(obs, head_dino=head_dino, chunk=self.batch_size)
-        r = np.clip(v - v0, -self.clip, self.clip)
+        _static = self.reward_mode == "progress"
+        v, v0 = self.student.values(obs, head_dino=head_dino, chunk=self.batch_size, static=_static)
+        r = np.clip(v - v0 if _static else v, -self.clip, self.clip)
 
         # An all-invalid mask or an all-zero track silently turns the dense reward into a constant, so
         # report both for the first few chunks and then periodically.
@@ -237,10 +256,12 @@ class StudentDenseReward:
         if self._chunks_scored <= 5 or self._chunks_scored % 100 == 0:
             moved = np.abs(track[..., -1, :]).sum(-1) > 1e-4
             _logger.info(
-                "student_reward[%s] chunk %d: valid %.1f%% of patches, moved %.1f%%, "
-                "|track| max %.4f m, V %.3f..%.3f, V0 %.3f..%.3f, r %.3f..%.3f",
-                self.track_source, self._chunks_scored, 100 * valid.mean(), 100 * moved.mean(),
+                "student_reward[%s/%s] chunk %d: valid %.1f%% of patches, moved %.1f%%, "
+                "|track| max %.4f m, V %.3f..%.3f, V0 %s, r %.3f..%.3f",
+                self.track_source, self.reward_mode, self._chunks_scored,
+                100 * valid.mean(), 100 * moved.mean(),
                 float(np.abs(track).max()), float(v.min()), float(v.max()),
-                float(v0.min()), float(v0.max()), float(r.min()), float(r.max()),
+                "n/a" if v0 is None else f"{float(v0.min()):.3f}..{float(v0.max()):.3f}",
+                float(r.min()), float(r.max()),
             )
         return torch.as_tensor(r, dtype=torch.float32)

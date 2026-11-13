@@ -80,6 +80,7 @@ env:
     seeds_path: ${oc.env:REPO_PATH}/rlinf/envs/sim/robotwin/seeds/scan_object_train_seeds_heldout.json
     center_crop: False
     student_reward:
+      reward_mode: progress   # pinned 2026-11-13: this run predates reward_mode, whose default is now raw
       enabled: True   # track-conditioned student V(s, track) - V(s, 0) on top of the sparse reward (env/robotwin_scan_object.yaml)
     task_config:
       action_type: ee   # 16-d world-frame EE pose + gripper per arm (see gen_sparse_reward_data)

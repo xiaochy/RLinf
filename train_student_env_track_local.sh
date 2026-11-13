@@ -23,9 +23,17 @@ WHICH=${1:?usage: $0 n30|n100 <accelerator_rank>}
 RANK=${2:?usage: $0 n30|n100 <accelerator_rank>}
 REWARD=${REWARD:-student}
 case "$REWARD" in
+  # student: r = V(s, track) - V(s, 0). The zero-track baseline is out of
+  # distribution (training never shows a zero track), so the subtraction injects
+  # whatever the model does off-distribution. Kept to reproduce the 11-08/11-12
+  # runs; its config pins reward_mode: progress.
   student) BASE_CONFIG=robotwin_scan_object_ppo_gap_flow_student_env_${WHICH}L0p5 ;;
+  # rawv: r = V(s, track), which is what the student was trained to output -- its
+  # task teacher's logit 16 frames ahead. PPO's critic absorbs the state-dependent
+  # part instead of a hand-built baseline removing it.
+  rawv)    BASE_CONFIG=robotwin_scan_object_ppo_gap_flow_student_rawv_${WHICH}L0p5 ;;
   sparse)  BASE_CONFIG=robotwin_scan_object_ppo_gap_flow_sparse_heldoutseeds_${WHICH}L0p5 ;;
-  *) echo "REWARD must be student or sparse, got $REWARD"; exit 2 ;;
+  *) echo "REWARD must be student, rawv or sparse, got $REWARD"; exit 2 ;;
 esac
 
 W=/data/vxiao/bimanual_manipulation/RLinf-student-track
