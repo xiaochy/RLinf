@@ -51,6 +51,11 @@ import tyro
 from flax.nnx import traversals
 from openpi.training import utils
 
+from rlinf.utils.ckpt_convertor.openpi.lora_merge import (
+    lora_leaf_paths,
+    merge_lora_params,
+)
+
 
 def slice_paligemma_state_dict(state_dict, config):
     """Convert PaliGemma JAX parameters to PyTorch format."""
@@ -336,7 +341,14 @@ def slice_paligemma_state_dict(state_dict, config):
 
 
 def slice_gemma_state_dict(state_dict, config, *, num_expert, checkpoint_dir, pi05):
-    """Convert Gemma JAX parameters to PyTorch format."""
+    """Convert Gemma JAX parameters to PyTorch format.
+
+    ``pi05`` selects adaptive normalisation (the ``Dense_0`` parameters) over plain
+    RMSNorm. It used to be decided by ``"pi05" in checkpoint_dir``, i.e. by whether the
+    path happened to contain the string, so a pi05 checkpoint in a directory not named
+    for it converted as a pi0 and failed later on missing keys. ``checkpoint_dir`` is
+    kept in the signature for callers and messages only.
+    """
     # Add missing attributes to config if they don't exist
     if not hasattr(config, "vocab_size"):
         config.vocab_size = 257152  # PALIGEMMA_VOCAB_SIZE
@@ -369,7 +381,7 @@ def slice_gemma_state_dict(state_dict, config, *, num_expert, checkpoint_dir, pi
     llm_mlp_linear = state_dict.pop(f"llm/layers/mlp_{num_expert}/linear{suffix}")
 
     # Check if we have Dense layers (for pi05/adaptive normalization) or scale layers (for regular pi0)
-    if "pi05" in checkpoint_dir:
+    if pi05:
         # Pi05 with adaptive normalization
         llm_input_layernorm_bias = state_dict.pop(
             f"llm/layers/pre_attention_norm_{num_expert}/Dense_0/bias{suffix}"
@@ -432,7 +444,7 @@ def slice_gemma_state_dict(state_dict, config, *, num_expert, checkpoint_dir, pi
             f"paligemma_with_expert.gemma_expert.model.layers.{i}.mlp.down_proj.weight"
         ] = llm_mlp_linear[i].transpose()
 
-        if "pi05" in checkpoint_dir:
+        if pi05:
             # Pi05 with adaptive normalization - use Dense layer parameters directly
             state_dict[
                 f"paligemma_with_expert.gemma_expert.model.layers.{i}.input_layernorm.dense.bias"
@@ -456,7 +468,7 @@ def slice_gemma_state_dict(state_dict, config, *, num_expert, checkpoint_dir, pi
             ] = llm_post_attention_layernorm[i]
 
     # Handle final norm layer
-    if "pi05" in checkpoint_dir:
+    if pi05:
         # Pi05 with adaptive normalization - use Dense layer parameters directly
         final_norm_bias = state_dict.pop(
             f"llm/final_norm_{num_expert}/Dense_0/bias{suffix}"
@@ -489,15 +501,34 @@ def slice_gemma_state_dict(state_dict, config, *, num_expert, checkpoint_dir, pi
 
 
 def slice_initial_orbax_checkpoint(
-    checkpoint_dir: str, restore_precision: str | None = None
+    checkpoint_dir: str,
+    restore_precision: str | None = None,
+    model_config: openpi.models.pi0_config.Pi0Config | None = None,
 ):
     """Load and process params by restoring via JAX model loader first.
     This respects dtype conversions that occur during model restore.
+
+    When ``model_config`` is given and names LoRA variants, the LoRA factors are folded
+    into the base weights first. Everything below reads only the base weight, and
+    ``load_state_dict(strict=False)`` accepts whatever is left over, so a LoRA checkpoint
+    converted without this step produced the base model and said nothing.
     """
     # Use repository restore utility to load a pure dict of params (value suffix removed)
     params = openpi.models.model.restore_params(
         f"{checkpoint_dir}/params/", restore_type=np.ndarray, dtype=restore_precision
     )
+
+    if model_config is not None:
+        merge_lora_params(
+            params,
+            paligemma_variant=model_config.paligemma_variant,
+            action_expert_variant=model_config.action_expert_variant,
+        )
+    elif lora_leaf_paths(params):
+        raise ValueError(
+            "this checkpoint carries LoRA parameters; pass model_config so they can be "
+            "merged, or the conversion would write the base model and drop the finetune."
+        )
 
     return {
         "paligemma_params": traversals.flatten_mapping(params["PaliGemma"], sep="/"),
@@ -543,7 +574,9 @@ def convert_pi0_checkpoint(
 
     # Break down orbax ckpts by restoring via JAX to respect dtype
     initial_params = slice_initial_orbax_checkpoint(
-        checkpoint_dir=checkpoint_dir, restore_precision="float32"
+        checkpoint_dir=checkpoint_dir,
+        restore_precision="float32",
+        model_config=model_config,
     )
 
     # Process projection params
@@ -631,8 +664,31 @@ def convert_pi0_checkpoint(
     # Combine all parameters (no prefix needed for our model structure)
     all_params = {**paligemma_params, **gemma_params, **projection_params}
 
-    # Load state dict
-    pi0_model.load_state_dict(all_params, strict=False)
+    # strict=False is load-bearing: the converted tree carries no buffers and the model
+    # may define extra heads. But it also swallows a backbone key that never arrived,
+    # which is how a half-converted checkpoint used to reach an eval. Report both lists
+    # and fail on a missing backbone weight.
+    incompatible = pi0_model.load_state_dict(all_params, strict=False)
+    backbone_missing = [
+        k
+        for k in incompatible.missing_keys
+        if k.startswith(("paligemma_with_expert.", "action_", "state_proj", "time_mlp"))
+    ]
+    if incompatible.unexpected_keys:
+        print(
+            f"{len(incompatible.unexpected_keys)} converted key(s) the model does not "
+            f"define, e.g. {incompatible.unexpected_keys[:5]}"
+        )
+    if backbone_missing:
+        raise ValueError(
+            f"{len(backbone_missing)} backbone weight(s) were not provided by the "
+            f"conversion, e.g. {backbone_missing[:5]}"
+        )
+    if incompatible.missing_keys:
+        print(
+            f"{len(incompatible.missing_keys)} non-backbone key(s) left at their "
+            f"initialised values, e.g. {incompatible.missing_keys[:5]}"
+        )
 
     if precision == "float32":
         pi0_model = pi0_model.to(torch.float32)

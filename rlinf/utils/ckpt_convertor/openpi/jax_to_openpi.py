@@ -36,6 +36,10 @@ from rlinf.utils.ckpt_convertor.openpi._core import (
     save_safetensors,
     write_config_json,
 )
+from rlinf.utils.ckpt_convertor.openpi.lora_merge import (
+    merge_lora_params,
+    unwrap_value_leaves,
+)
 
 # So400m/14 SigLIP width and the two LLM expert widths (pi05 base).
 _SIGLIP_WIDTH = 1152
@@ -75,7 +79,11 @@ def _load_jax_params(checkpoint_dir: str | pathlib.Path) -> dict:
     # peel a single ``params`` wrapper when present.
     if "PaliGemma" not in restored and isinstance(restored.get("params"), dict):
         restored = restored["params"]
-    return restored
+    # Checkpoints written by openpi's training loop wrap every leaf as
+    # ``{"value": array}``; the converters below index straight to the array. The
+    # reference pi05_base checkpoint happens not to be wrapped, which is why this
+    # went unnoticed.
+    return unwrap_value_leaves(restored)
 
 
 def convert_siglip(params: dict) -> dict:
@@ -289,13 +297,22 @@ def convert(
 ) -> pathlib.Path:
     """Convert a JAX checkpoint dir to an OpenPI checkpoint.
 
-    Loads the JAX params from ``input_model``, converts SigLIP/LLM/projections,
+    Loads the JAX params from ``input_model``, folds in any LoRA factors (see
+    ``lora_merge``), converts SigLIP/LLM/projections,
     writes ``output_model/model.safetensors`` (fp32 weights) + ``config.json``
     (carrying a ``dtype: bfloat16`` hint), and copies ``input_norm_stats`` verbatim
     to ``output_norm_stats``.
     """
     output_model = pathlib.Path(output_model)
     params = _load_jax_params(input_model)
+    # A LoRA finetune keeps its trained factors beside the frozen base weight, and
+    # everything below reads only the base weight. Without this the conversion would
+    # succeed and write the BASE model, dropping the finetune silently.
+    merge_lora_params(
+        params,
+        paligemma_variant=paligemma_variant,
+        action_expert_variant=action_expert_variant,
+    )
 
     merged: dict[str, torch.Tensor] = {}
     for part in (
@@ -342,8 +359,17 @@ def add_arguments(parser) -> None:
     parser.add_argument("--action-dim", type=int, default=32)
     parser.add_argument("--action-horizon", type=int, default=32)
     parser.add_argument("--max-token-len", type=int, default=200)
-    parser.add_argument("--paligemma-variant", default="gemma_2b")
-    parser.add_argument("--action-expert-variant", default="gemma_300m")
+    # The _lora variants are not cosmetic here: they carry the rank and alpha the
+    # LoRA merge scales by, and a LoRA checkpoint converted under a non-LoRA variant
+    # is refused rather than silently stripped of its finetune.
+    parser.add_argument(
+        "--paligemma-variant", default="gemma_2b", help="gemma_2b or gemma_2b_lora"
+    )
+    parser.add_argument(
+        "--action-expert-variant",
+        default="gemma_300m",
+        help="gemma_300m or gemma_300m_lora",
+    )
 
 
 def run(args) -> None:
