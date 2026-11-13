@@ -55,6 +55,9 @@ from rlinf.utils.ckpt_convertor.openpi.lora_merge import (
     lora_leaf_paths,
     merge_lora_params,
 )
+from rlinf.utils.logging import get_logger
+
+logger = get_logger()
 
 
 def slice_paligemma_state_dict(state_dict, config):
@@ -344,10 +347,8 @@ def slice_gemma_state_dict(state_dict, config, *, num_expert, checkpoint_dir, pi
     """Convert Gemma JAX parameters to PyTorch format.
 
     ``pi05`` selects adaptive normalisation (the ``Dense_0`` parameters) over plain
-    RMSNorm. It used to be decided by ``"pi05" in checkpoint_dir``, i.e. by whether the
-    path happened to contain the string, so a pi05 checkpoint in a directory not named
-    for it converted as a pi0 and failed later on missing keys. ``checkpoint_dir`` is
-    kept in the signature for callers and messages only.
+    RMSNorm; it must not be inferred from the checkpoint path. ``checkpoint_dir`` is kept
+    in the signature for callers and messages only.
     """
     # Add missing attributes to config if they don't exist
     if not hasattr(config, "vocab_size"):
@@ -509,9 +510,9 @@ def slice_initial_orbax_checkpoint(
     This respects dtype conversions that occur during model restore.
 
     When ``model_config`` is given and names LoRA variants, the LoRA factors are folded
-    into the base weights first. Everything below reads only the base weight, and
-    ``load_state_dict(strict=False)`` accepts whatever is left over, so a LoRA checkpoint
-    converted without this step produced the base model and said nothing.
+    into the base weights first; without that step a LoRA checkpoint converts to the base
+    model, because everything below reads only the base weight and
+    ``load_state_dict(strict=False)`` accepts whatever is left over.
     """
     # Use repository restore utility to load a pure dict of params (value suffix removed)
     params = openpi.models.model.restore_params(
@@ -664,10 +665,9 @@ def convert_pi0_checkpoint(
     # Combine all parameters (no prefix needed for our model structure)
     all_params = {**paligemma_params, **gemma_params, **projection_params}
 
-    # strict=False is load-bearing: the converted tree carries no buffers and the model
-    # may define extra heads. But it also swallows a backbone key that never arrived,
-    # which is how a half-converted checkpoint used to reach an eval. Report both lists
-    # and fail on a missing backbone weight.
+    # strict=False is needed: the converted tree carries no buffers and the model may
+    # define extra heads. It also hides a backbone key that never arrived, so the two key
+    # lists are reported and a missing backbone weight is fatal.
     incompatible = pi0_model.load_state_dict(all_params, strict=False)
     backbone_missing = [
         k
@@ -675,9 +675,10 @@ def convert_pi0_checkpoint(
         if k.startswith(("paligemma_with_expert.", "action_", "state_proj", "time_mlp"))
     ]
     if incompatible.unexpected_keys:
-        print(
-            f"{len(incompatible.unexpected_keys)} converted key(s) the model does not "
-            f"define, e.g. {incompatible.unexpected_keys[:5]}"
+        logger.warning(
+            "%d converted key(s) the model does not define, e.g. %s",
+            len(incompatible.unexpected_keys),
+            incompatible.unexpected_keys[:5],
         )
     if backbone_missing:
         raise ValueError(
@@ -685,9 +686,10 @@ def convert_pi0_checkpoint(
             f"conversion, e.g. {backbone_missing[:5]}"
         )
     if incompatible.missing_keys:
-        print(
-            f"{len(incompatible.missing_keys)} non-backbone key(s) left at their "
-            f"initialised values, e.g. {incompatible.missing_keys[:5]}"
+        logger.info(
+            "%d non-backbone key(s) left at their initialised values, e.g. %s",
+            len(incompatible.missing_keys),
+            incompatible.missing_keys[:5],
         )
 
     if precision == "float32":

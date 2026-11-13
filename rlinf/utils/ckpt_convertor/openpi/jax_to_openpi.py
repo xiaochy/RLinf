@@ -79,10 +79,8 @@ def _load_jax_params(checkpoint_dir: str | pathlib.Path) -> dict:
     # peel a single ``params`` wrapper when present.
     if "PaliGemma" not in restored and isinstance(restored.get("params"), dict):
         restored = restored["params"]
-    # Checkpoints written by openpi's training loop wrap every leaf as
-    # ``{"value": array}``; the converters below index straight to the array. The
-    # reference pi05_base checkpoint happens not to be wrapped, which is why this
-    # went unnoticed.
+    # openpi's training loop wraps every leaf as ``{"value": array}``; the convertors below
+    # index straight to the array.
     return unwrap_value_leaves(restored)
 
 
@@ -305,9 +303,8 @@ def convert(
     """
     output_model = pathlib.Path(output_model)
     params = _load_jax_params(input_model)
-    # A LoRA finetune keeps its trained factors beside the frozen base weight, and
-    # everything below reads only the base weight. Without this the conversion would
-    # succeed and write the BASE model, dropping the finetune silently.
+    # A LoRA finetune keeps its factors beside the frozen base weight, and everything below
+    # reads only the base weight; without this the conversion writes the base model.
     merge_lora_params(
         params,
         paligemma_variant=paligemma_variant,
@@ -359,9 +356,8 @@ def add_arguments(parser) -> None:
     parser.add_argument("--action-dim", type=int, default=32)
     parser.add_argument("--action-horizon", type=int, default=32)
     parser.add_argument("--max-token-len", type=int, default=200)
-    # The _lora variants are not cosmetic here: they carry the rank and alpha the
-    # LoRA merge scales by, and a LoRA checkpoint converted under a non-LoRA variant
-    # is refused rather than silently stripped of its finetune.
+    # The variant carries the rank and alpha the LoRA merge scales by. A LoRA checkpoint
+    # given a non-LoRA variant is refused, not stripped of its finetune.
     parser.add_argument(
         "--paligemma-variant", default="gemma_2b", help="gemma_2b or gemma_2b_lora"
     )

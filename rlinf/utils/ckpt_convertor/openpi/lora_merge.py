@@ -12,35 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Merge LoRA factors into the base weights of a JAX Pi0/Pi05 checkpoint.
+"""Fold a LoRA finetune's factors into the base weights of a JAX Pi0/Pi05 checkpoint.
 
-A LoRA finetune saves the frozen base weight next to the two trained factors
-``lora_a`` / ``lora_b``, and openpi's own modules add the product back at call
-time. Every converter in this package reads only the base weight, so converting
-a LoRA checkpoint without merging first silently produces the BASE model: the
-finetune is dropped, the safetensors file loads without complaint, and the
-resulting eval looks like a policy that did not learn rather than like a broken
-conversion. Measured on
-``RoboTwin/policy/pi05/checkpoints/pi05_scan_object_lora_100/scan_object_lora_100/6000``,
-20 of 71 parameter leaves are LoRA factors and all 20 were being ignored.
+openpi stores a LoRA finetune as the frozen base weight plus ``lora_a`` / ``lora_b`` and adds
+the product back at call time. The convertors in this package read only the base weight and
+load with ``strict=False``, so a LoRA checkpoint has to be merged here first; otherwise the
+conversion yields the base model and reports nothing.
 
-Two modules hold factors, and openpi scales them differently; both are
-reproduced here rather than unified:
+Each module's own scaling is reproduced rather than unified, because they differ:
+``openpi.models.lora.Einsum`` multiplies the product by ``alpha / rank`` (``alpha /
+sqrt(rank)`` under rslora), while ``openpi.models.lora.FeedForward._dot`` applies no scaling.
+Both LoRA variants openpi ships set ``alpha == rank``, so the two agree today; a variant that
+changed alpha would not.
 
-``openpi.models.lora.Einsum``
-    ``w + scaling * (a @ b)``, with ``scaling = alpha / rank`` (``alpha /
-    sqrt(rank)`` under rslora). Parameters ``w``, ``lora_a``, ``lora_b``.
-``openpi.models.lora.FeedForward``
-    ``w + (a @ b)``, with **no** scaling -- its ``_dot`` simply omits the factor
-    that ``Einsum.__call__`` applies. Parameters ``gating_einsum`` / ``linear``
-    and ``<name>_lora_a`` / ``<name>_lora_b``.
-
-The two agree for every variant openpi ships, because each sets ``alpha ==
-rank`` and so ``scaling == 1.0``. They are kept apart anyway: a variant that
-changes alpha would otherwise quietly rescale half the model.
-
-In every case the factors contract over the last two axes and broadcast over the
-leading stacked-layer axes, so the merge is one ``matmul`` per pair.
+Factors contract over the last two axes and broadcast over the leading stacked-layer axes, so
+each pair merges with one ``matmul``.
 """
 
 from __future__ import annotations
@@ -50,23 +36,20 @@ from typing import Any
 
 import numpy as np
 
-try:  # RLinf's logger when the full package is importable ...
+try:
     from rlinf.utils.logging import get_logger
 
     logger = get_logger()
-except ImportError:  # ... and the stdlib one when it is not.
-    # This module is the one piece of the convertor that has to run inside the
-    # JAX/openpi environment as well (that is where a LoRA checkpoint can be
-    # checked against openpi's own forward pass), and that environment does not
+except ImportError:
+    # This module also has to import inside the JAX/openpi environment, which does not
     # carry RLinf's torch stack.
     import logging
 
     logger = logging.getLogger(__name__)
 
-# rank and alpha, from openpi.models.gemma.get_config. openpi is deliberately
-# not imported by this package, so the two LoRA variants it defines are listed
-# here and the rank is cross-checked against the array shapes below; an
-# unlisted variant raises rather than being guessed at.
+# rank and alpha, from openpi.models.gemma.get_config. openpi is deliberately not a
+# dependency of this package, so its LoRA variants are listed here; the rank is checked
+# against the array shapes, and an unlisted variant raises.
 _LORA_VARIANTS: dict[str, tuple[int, float]] = {
     "gemma_2b_lora": (16, 16.0),
     "gemma_300m_lora": (32, 32.0),
@@ -129,7 +112,9 @@ def _scaling(variant: str, module: str, rank_from_shape: int, *, rslora: bool) -
     return alpha / math.sqrt(rank) if rslora else alpha / rank
 
 
-def _merge_pair(node: dict, base_key: str, a_key: str, b_key: str, scaling: float) -> tuple[int, float]:
+def _merge_pair(
+    node: dict, base_key: str, a_key: str, b_key: str, scaling: float
+) -> tuple[int, float]:
     a = np.asarray(node.pop(a_key), dtype=np.float32)
     b = np.asarray(node.pop(b_key), dtype=np.float32)
     base = np.asarray(node[base_key])
@@ -141,8 +126,8 @@ def _merge_pair(node: dict, base_key: str, a_key: str, b_key: str, scaling: floa
         )
     merged = base.astype(np.float32) + delta
     node[base_key] = merged if base.dtype == np.float32 else merged.astype(base.dtype)
-    # Reported as two magnitudes rather than a ratio: a freshly initialised Einsum has an
-    # all-zero base weight, and a ratio against it is meaningless rather than large.
+    # Two magnitudes rather than a ratio: an Einsum's base weight initialises to zeros, and
+    # a ratio against that says nothing.
     return int(a.shape[-1]), (float(np.abs(delta).max()), float(np.abs(base).max()))
 
 
@@ -168,7 +153,9 @@ def merge_lora_params(
     """
     report: list[str] = []
     present = lora_leaf_paths(params)
-    if present and not (is_lora_variant(paligemma_variant) or is_lora_variant(action_expert_variant)):
+    if present and not (
+        is_lora_variant(paligemma_variant) or is_lora_variant(action_expert_variant)
+    ):
         raise ValueError(
             f"the checkpoint carries {len(present)} LoRA parameter(s) (e.g. {present[0]}) but "
             f"the variants given are {paligemma_variant!r} / {action_expert_variant!r}. Pass the "
@@ -185,11 +172,15 @@ def merge_lora_params(
             return
         if "lora_a" in node and "lora_b" in node:
             if _EINSUM_BASE not in node:
-                raise ValueError(f"{path} has LoRA factors but no {_EINSUM_BASE!r} base weight")
+                raise ValueError(
+                    f"{path} has LoRA factors but no {_EINSUM_BASE!r} base weight"
+                )
             variant = variant_for(name)
             rank = int(np.asarray(node["lora_a"]).shape[-1])
             scaling = _scaling(variant, "attn", rank, rslora=rslora)
-            _, (d_max, w_max) = _merge_pair(node, _EINSUM_BASE, "lora_a", "lora_b", scaling)
+            _, (d_max, w_max) = _merge_pair(
+                node, _EINSUM_BASE, "lora_a", "lora_b", scaling
+            )
             report.append(
                 f"{path}/w  rank={rank} scaling={scaling:g} "
                 f"max|delta|={d_max:.3e} max|w|={w_max:.3e}"
@@ -198,7 +189,9 @@ def merge_lora_params(
             a_key, b_key = f"{base}_lora_a", f"{base}_lora_b"
             if a_key in node and b_key in node:
                 if base not in node:
-                    raise ValueError(f"{path} has LoRA factors but no {base!r} base weight")
+                    raise ValueError(
+                        f"{path} has LoRA factors but no {base!r} base weight"
+                    )
                 variant = variant_for(name)
                 rank = int(np.asarray(node[a_key]).shape[-1])
                 scaling = _scaling(variant, "ffn", rank, rslora=rslora)
