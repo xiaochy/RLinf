@@ -166,7 +166,9 @@ class StudentDenseReward:
         self.batch_size = int(cfg.get("batch_size", 4))
         self._recorders = {}
         self._chunks_scored = 0
-        self._chunks_flat = 0
+        self._chunks_clipflat = 0
+        self._chunks_degenerate = 0
+        self._last_flat = None
 
     @staticmethod
     def _np(x):
@@ -256,20 +258,40 @@ class StudentDenseReward:
         # report both for the first few chunks and then periodically.
         self._chunks_scored += 1
 
-        # So does the clip: in ``raw`` mode V carries a large state-dependent offset, so a clip picked for
-        # the difference form can push every candidate of a chunk onto the same bound. The reward is then
-        # a constant across the batch and says nothing about which action was better -- the chunk is
-        # silently wasted. This happened to 17 of 48 logged chunks of the 20261113-115812 n100 run with
-        # clip 5.0, and the periodic line above only showed it once every 100 chunks, so count it.
+        # A chunk whose reward is identical across the batch says nothing about which of the B candidate
+        # actions was better, so it is wasted. There are two causes and they need opposite fixes:
+        #
+        #   clip-flat    every candidate sits on the +-clip bound, i.e. the clip was sized for a
+        #                different quantity. 17 of the 48 logged chunks of the 20261113-115812 n100 run
+        #                were like this, because clip 5.0 was inherited from reward_mode=progress while
+        #                raw V runs -6.9..+2.9. The fix is to widen the clip.
+        #   degenerate   the candidates produced identical student inputs -- an all-zero track (nothing
+        #                moved in the chunk) or an all-invalid mask -- so V is identical before any
+        #                clipping happens. No clip setting can fix this, and a few per hundred is normal.
+        #
+        # Blaming the clip for a degenerate chunk is a false alarm that reads exactly like the real
+        # defect, so the two are counted apart, only the clip rate escalates to a warning, and the
+        # message quotes the offending chunk instead of whichever chunk happened to be the hundredth.
         if B > 1:
-            self._chunks_flat += bool(float(r.max() - r.min()) < 1e-6)
-            if self._chunks_flat and self._chunks_scored % 100 == 0:
-                _logger.warning(
-                    "student_reward[%s/%s]: %d of %d chunks (%.0f%%) had every candidate on the same "
-                    "clip bound (|clip| = %.1f) and carried no signal; raw spread this chunk %.3f..%.3f",
-                    self.track_source, self.reward_mode, self._chunks_flat, self._chunks_scored,
-                    100.0 * self._chunks_flat / self._chunks_scored, self.clip,
-                    float(raw.min()), float(raw.max()),
+            if float(r.max() - r.min()) < 1e-6:
+                _clipped = float(np.abs(raw).min()) >= self.clip - 1e-6
+                if _clipped:
+                    self._chunks_clipflat += 1
+                else:
+                    self._chunks_degenerate += 1
+                self._last_flat = (
+                    "pinned to the clip" if _clipped else "degenerate inputs",
+                    self._chunks_scored, float(raw.min()), float(raw.max()),
+                )
+            if self._chunks_scored % 100 == 0 and self._last_flat is not None:
+                _kind, _at, _lo, _hi = self._last_flat
+                _frac = 100.0 * self._chunks_clipflat / self._chunks_scored
+                (_logger.warning if _frac >= 5.0 else _logger.info)(
+                    "student_reward[%s/%s]: of %d chunks, %d (%.0f%%) had every candidate pinned to the "
+                    "|clip| = %.1f bound, %d were degenerate (identical student inputs, the clip is not "
+                    "why); last flat chunk was %d, %s, raw %.3f..%.3f",
+                    self.track_source, self.reward_mode, self._chunks_scored, self._chunks_clipflat,
+                    _frac, self.clip, self._chunks_degenerate, _at, _kind, _lo, _hi,
                 )
         if self._chunks_scored <= 5 or self._chunks_scored % 100 == 0:
             moved = np.abs(track[..., -1, :]).sum(-1) > 1e-4
