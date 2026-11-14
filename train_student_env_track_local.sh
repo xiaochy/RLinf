@@ -113,7 +113,12 @@ esac
 # m marks a negative offset, which is the expected sign for reward_mode=raw.
 [ -n "$OFFSET" ] && LOG_ROOT=${LOG_ROOT}_off$(echo "$OFFSET" | tr -d '.+' | tr '-' 'm')
 SUMMARY=$LOG_ROOT/summary_${WHICH}.log
-MAX_STEP=40
+# MAX_STEP bounds the resume loop AND is passed as runner.max_epochs. Both, because the configs
+# pin max_epochs: 40: resuming a step-40 checkpoint without raising it makes the trainer decide it
+# is already done and run zero steps, which looks like a successful no-op.
+# It deliberately does NOT add a LOG_ROOT suffix -- extending an arm has to land in the same root
+# so latest_ckpt() finds the step it is continuing from.
+MAX_STEP=${MAX_STEP:-40}
 mkdir -p "$LOG_ROOT"
 
 for p in "$ASSETS/assets/embodiments/aloha-agilex/curobo_left.yml" \
@@ -122,7 +127,7 @@ for p in "$ASSETS/assets/embodiments/aloha-agilex/curobo_left.yml" \
          "$FM" "$STUDENT/checkpoints/student/student.pt" "$SVMREF/svm/preprocess.py"; do
     [ -e "$p" ] || { echo "PREFLIGHT MISSING: $p" | tee -a "$SUMMARY"; exit 1; }
 done
-echo "=== $(date) preflight OK ($WHICH, accelerator rank $RANK, reward=$REWARD, lr=${LR:-config default 5e-7}, seed=${SEED:-config default 1234}, offset=${OFFSET:-config default 0.0}, base=$FM) ===" | tee -a "$SUMMARY"
+echo "=== $(date) preflight OK ($WHICH, accelerator rank $RANK, reward=$REWARD, lr=${LR:-config default 5e-7}, seed=${SEED:-config default 1234}, offset=${OFFSET:-config default 0.0}, max_step=$MAX_STEP, base=$FM) ===" | tee -a "$SUMMARY"
 
 latest_ckpt() {
     ls -d "$LOG_ROOT"/*-${CONFIG}/*/checkpoints/global_step_* 2>/dev/null \
@@ -151,7 +156,7 @@ for attempt in 1 2 3 4 5 6 7 8 9 10; do
     LOG_DIR=$LOG_ROOT/$(date +'%Y%m%d-%H%M%S')-${CONFIG}
     mkdir -p "$LOG_DIR"
     SR=env.train.student_reward
-    OV=(runner.logger.log_path="$LOG_DIR" actor.model.model_path="$FM")
+    OV=(runner.logger.log_path="$LOG_DIR" actor.model.model_path="$FM" runner.max_epochs="$MAX_STEP")
     [ -n "$LR" ] && OV+=(actor.optim.lr="$LR")
     [ -n "$SEED" ] && OV+=(actor.seed="$SEED")
     [ -n "$OFFSET" ] && OV+=($SR.offset="$OFFSET")
