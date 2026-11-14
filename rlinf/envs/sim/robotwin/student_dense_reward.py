@@ -258,16 +258,22 @@ class StudentDenseReward:
         # report both for the first few chunks and then periodically.
         self._chunks_scored += 1
 
-        # A chunk whose reward is identical across the batch says nothing about which of the B candidate
-        # actions was better, so it is wasted. There are two causes and they need opposite fixes:
+        # B is the number of parallel envs, each contributing the one chunk its policy sampled and
+        # executed -- PPO ranks nothing here, so there are no candidate actions to compare. (An earlier
+        # version of this comment said there were, confusing B with ``batch_size``, which is only the
+        # minibatch size values() forwards in.)
         #
-        #   clip-flat    every candidate sits on the +-clip bound, i.e. the clip was sized for a
-        #                different quantity. 17 of the 48 logged chunks of the 20261113-115812 n100 run
-        #                were like this, because clip 5.0 was inherited from reward_mode=progress while
-        #                raw V runs -6.9..+2.9. The fix is to widen the clip.
-        #   degenerate   the candidates produced identical student inputs -- an all-zero track (nothing
-        #                moved in the chunk) or an all-invalid mask -- so V is identical before any
-        #                clipping happens. No clip setting can fix this, and a few per hundred is normal.
+        # What the check below is for: B envs sitting at B different points of B different episodes
+        # should not all receive the *same* reward. When they do, the reward has stopped varying with
+        # the state and the step carries no learning signal at all. Two causes, opposite fixes:
+        #
+        #   clip-flat    every env's V is past the +-clip bound, i.e. the clip was sized for a different
+        #                quantity. 17 of the 48 logged chunks of the 20261113-115812 n100 run were like
+        #                this, because clip 5.0 was inherited from reward_mode=progress while raw V runs
+        #                -6.9..+2.9. The fix is to widen the clip.
+        #   degenerate   the envs produced identical student inputs -- an all-zero track (nothing moved
+        #                in the chunk) or an all-invalid mask -- so V is identical before any clipping
+        #                happens. No clip setting can fix this, and a few per hundred is normal.
         #
         # Blaming the clip for a degenerate chunk is a false alarm that reads exactly like the real
         # defect, so the two are counted apart, only the clip rate escalates to a warning, and the
@@ -287,9 +293,9 @@ class StudentDenseReward:
                 _kind, _at, _lo, _hi = self._last_flat
                 _frac = 100.0 * self._chunks_clipflat / self._chunks_scored
                 (_logger.warning if _frac >= 5.0 else _logger.info)(
-                    "student_reward[%s/%s]: of %d chunks, %d (%.0f%%) had every candidate pinned to the "
-                    "|clip| = %.1f bound, %d were degenerate (identical student inputs, the clip is not "
-                    "why); last flat chunk was %d, %s, raw %.3f..%.3f",
+                    "student_reward[%s/%s]: of %d chunks, %d (%.0f%%) gave every env the same reward "
+                    "at the |clip| = %.1f bound, %d from identical student inputs instead (the clip is "
+                    "not why); last flat chunk was %d, %s, raw %.3f..%.3f",
                     self.track_source, self.reward_mode, self._chunks_scored, self._chunks_clipflat,
                     _frac, self.clip, self._chunks_degenerate, _at, _kind, _lo, _hi,
                 )
