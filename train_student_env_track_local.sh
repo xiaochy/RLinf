@@ -22,6 +22,13 @@ set -uo pipefail
 WHICH=${1:?usage: $0 n30|n100 <accelerator_rank>}
 RANK=${2:?usage: $0 n30|n100 <accelerator_rank>}
 REWARD=${REWARD:-student}
+# LR overrides actor.optim.lr. Unset keeps the config's 5e-7, which is what every arm up to
+# 2026-11-13 ran at -- and at that lr the actor does not move: approx_kl stayed inside +-0.008
+# for all 40 steps of both 11-08 arms (mean |kl| 0.0019 / 0.0021) with entropy_loss exactly 0,
+# so the step-40 policy is nearly the SFT policy and a step-40-vs-SFT eval measures the eval's
+# own noise floor rather than the reward. Raising lr until approx_kl lands in PPO's usual
+# 0.01-0.05 band is a precondition for comparing rewards at all, not a follow-up.
+LR=${LR:-}
 case "$REWARD" in
   # student: r = V(s, track) - V(s, 0). The zero-track baseline is out of
   # distribution (training never shows a zero track), so the subtraction injects
@@ -86,6 +93,11 @@ case "$REWARD" in
   sparse)  LOG_ROOT=$W/ppo_sparse_heldoutseeds_runs ;;
   *) echo "no LOG_ROOT for REWARD=$REWARD"; exit 2 ;;
 esac
+# A different lr is a different arm, so it gets its own LOG_ROOT. Sharing one is not a tidiness
+# issue: latest_ckpt() globs $LOG_ROOT/*-${CONFIG}/*/checkpoints/global_step_*, so a REWARD=sparse
+# launch at lr 2e-6 found the 2026-11-10 lr-5e-7 sparse run sitting at step 40 and reported
+# "all 40 steps done" without running anything.
+[ -n "$LR" ] && LOG_ROOT=${LOG_ROOT}_lr$(echo "$LR" | tr -d '.+' | tr 'E' 'e')
 SUMMARY=$LOG_ROOT/summary_${WHICH}.log
 MAX_STEP=40
 mkdir -p "$LOG_ROOT"
@@ -96,7 +108,7 @@ for p in "$ASSETS/assets/embodiments/aloha-agilex/curobo_left.yml" \
          "$FM" "$STUDENT/checkpoints/student/student.pt" "$SVMREF/svm/preprocess.py"; do
     [ -e "$p" ] || { echo "PREFLIGHT MISSING: $p" | tee -a "$SUMMARY"; exit 1; }
 done
-echo "=== $(date) preflight OK ($WHICH, accelerator rank $RANK, base=$FM) ===" | tee -a "$SUMMARY"
+echo "=== $(date) preflight OK ($WHICH, accelerator rank $RANK, reward=$REWARD, lr=${LR:-config default 5e-7}, base=$FM) ===" | tee -a "$SUMMARY"
 
 latest_ckpt() {
     ls -d "$LOG_ROOT"/*-${CONFIG}/*/checkpoints/global_step_* 2>/dev/null \
@@ -126,6 +138,7 @@ for attempt in 1 2 3 4 5 6 7 8 9 10; do
     mkdir -p "$LOG_DIR"
     SR=env.train.student_reward
     OV=(runner.logger.log_path="$LOG_DIR" actor.model.model_path="$FM")
+    [ -n "$LR" ] && OV+=(actor.optim.lr="$LR")
     [ -n "$ck" ] && OV+=(runner.resume_dir="$ck")
 
     python "$EMBODIED_PATH/train_embodied_agent.py" \
