@@ -33,6 +33,13 @@ LR=${LR:-}
 # the only way to tell a real effect from a single run's luck, and the held-out eval's own
 # standard error at n=100 is 0.04, so a +0.09 from one run is 2.5 s.e. and still one run.
 SEED=${SEED:-}
+# OFFSET overrides student_reward.offset, subtracted from the reward before coef. Unset keeps the
+# config's 0.0, which is what every arm before 2026-11-14 ran at. For reward_mode=raw it should be
+# the midpoint between the mean V over successful and over failed episodes of the base policy,
+# measured offline by scripts/pinned-eval/calibrate_student_offset.py -- raw V is the task teacher's
+# logit 16 frames ahead, so it is negative on most chunks of a *successful* episode and that common
+# part is not removed by anything (advantages are whitened, and use_critic_model is false).
+OFFSET=${OFFSET:-}
 case "$REWARD" in
   # student: r = V(s, track) - V(s, 0). The zero-track baseline is out of
   # distribution (training never shows a zero track), so the subtraction injects
@@ -103,6 +110,8 @@ esac
 # "all 40 steps done" without running anything.
 [ -n "$LR" ] && LOG_ROOT=${LOG_ROOT}_lr$(echo "$LR" | tr -d '.+' | tr 'E' 'e')
 [ -n "$SEED" ] && LOG_ROOT=${LOG_ROOT}_s${SEED}
+# m marks a negative offset, which is the expected sign for reward_mode=raw.
+[ -n "$OFFSET" ] && LOG_ROOT=${LOG_ROOT}_off$(echo "$OFFSET" | tr -d '.+' | tr '-' 'm')
 SUMMARY=$LOG_ROOT/summary_${WHICH}.log
 MAX_STEP=40
 mkdir -p "$LOG_ROOT"
@@ -113,7 +122,7 @@ for p in "$ASSETS/assets/embodiments/aloha-agilex/curobo_left.yml" \
          "$FM" "$STUDENT/checkpoints/student/student.pt" "$SVMREF/svm/preprocess.py"; do
     [ -e "$p" ] || { echo "PREFLIGHT MISSING: $p" | tee -a "$SUMMARY"; exit 1; }
 done
-echo "=== $(date) preflight OK ($WHICH, accelerator rank $RANK, reward=$REWARD, lr=${LR:-config default 5e-7}, seed=${SEED:-config default 1234}, base=$FM) ===" | tee -a "$SUMMARY"
+echo "=== $(date) preflight OK ($WHICH, accelerator rank $RANK, reward=$REWARD, lr=${LR:-config default 5e-7}, seed=${SEED:-config default 1234}, offset=${OFFSET:-config default 0.0}, base=$FM) ===" | tee -a "$SUMMARY"
 
 latest_ckpt() {
     ls -d "$LOG_ROOT"/*-${CONFIG}/*/checkpoints/global_step_* 2>/dev/null \
@@ -145,6 +154,7 @@ for attempt in 1 2 3 4 5 6 7 8 9 10; do
     OV=(runner.logger.log_path="$LOG_DIR" actor.model.model_path="$FM")
     [ -n "$LR" ] && OV+=(actor.optim.lr="$LR")
     [ -n "$SEED" ] && OV+=(actor.seed="$SEED")
+    [ -n "$OFFSET" ] && OV+=($SR.offset="$OFFSET")
     [ -n "$ck" ] && OV+=(runner.resume_dir="$ck")
 
     python "$EMBODIED_PATH/train_embodied_agent.py" \
