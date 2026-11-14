@@ -83,6 +83,9 @@ env:
       enabled: True   # track-conditioned student V(s, track) on top of the sparse reward (env/robotwin_scan_object.yaml)
       track_source: env   # simulator ground-truth track of the executed chunk, not the dynamics model's prediction
       reward_mode: raw   # r = V(s, track) directly; no out-of-distribution zero-track baseline
+      clip: 10.0   # raw V is a teacher logit, measured over the 20261113-115812 n100 run at -6.91..+2.86;
+                   # the 5.0 inherited from the difference form clipped V.min in 38/48 logged chunks and
+                   # made all 4 candidates of 17/48 chunks exactly -5.000, i.e. no signal at all
     task_config:
       action_type: ee   # 16-d world-frame EE pose + gripper per arm (see gen_sparse_reward_data)
       planner_backend: curobo

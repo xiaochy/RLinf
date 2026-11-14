@@ -166,6 +166,7 @@ class StudentDenseReward:
         self.batch_size = int(cfg.get("batch_size", 4))
         self._recorders = {}
         self._chunks_scored = 0
+        self._chunks_flat = 0
 
     @staticmethod
     def _np(x):
@@ -248,11 +249,28 @@ class StudentDenseReward:
         obs["track_valid"] = valid
         _static = self.reward_mode == "progress"
         v, v0 = self.student.values(obs, head_dino=head_dino, chunk=self.batch_size, static=_static)
-        r = np.clip(v - v0 if _static else v, -self.clip, self.clip)
+        raw = v - v0 if _static else v
+        r = np.clip(raw, -self.clip, self.clip)
 
         # An all-invalid mask or an all-zero track silently turns the dense reward into a constant, so
         # report both for the first few chunks and then periodically.
         self._chunks_scored += 1
+
+        # So does the clip: in ``raw`` mode V carries a large state-dependent offset, so a clip picked for
+        # the difference form can push every candidate of a chunk onto the same bound. The reward is then
+        # a constant across the batch and says nothing about which action was better -- the chunk is
+        # silently wasted. This happened to 17 of 48 logged chunks of the 20261113-115812 n100 run with
+        # clip 5.0, and the periodic line above only showed it once every 100 chunks, so count it.
+        if B > 1:
+            self._chunks_flat += bool(float(r.max() - r.min()) < 1e-6)
+            if self._chunks_flat and self._chunks_scored % 100 == 0:
+                _logger.warning(
+                    "student_reward[%s/%s]: %d of %d chunks (%.0f%%) had every candidate on the same "
+                    "clip bound (|clip| = %.1f) and carried no signal; raw spread this chunk %.3f..%.3f",
+                    self.track_source, self.reward_mode, self._chunks_flat, self._chunks_scored,
+                    100.0 * self._chunks_flat / self._chunks_scored, self.clip,
+                    float(raw.min()), float(raw.max()),
+                )
         if self._chunks_scored <= 5 or self._chunks_scored % 100 == 0:
             moved = np.abs(track[..., -1, :]).sum(-1) > 1e-4
             _logger.info(

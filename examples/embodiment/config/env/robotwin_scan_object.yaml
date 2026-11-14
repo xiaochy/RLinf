@@ -108,5 +108,7 @@ student_reward:
   dino_repo_dir: /project_data/held/vxiao/Bimanual_Manipulation_Project/GAP-flowmatch-actiononly/thirdparty/dinov2
   dino_weights: /project_data/held/vxiao/Bimanual_Manipulation_Project/GAP-flowmatch-actiononly/pretrained/dinov2_vitl14_reg4_pretrain.pth
   coef: 0.05
-  clip: 5.0
+  clip: 5.0               # sized for reward_mode=progress, where r is a difference near zero. raw V is a teacher
+                         # logit measured at -6.91..+2.86 on scan_object, so a raw run needs clip ~10 or every
+                         # candidate of a chunk lands on the same bound and the chunk carries no signal
   batch_size: 4

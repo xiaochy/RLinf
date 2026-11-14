@@ -82,7 +82,9 @@ esac
 
 case "$REWARD" in
   student) LOG_ROOT=$W/ppo_student_env_runs ;;
+  rawv)    LOG_ROOT=$W/ppo_student_rawv_runs ;;
   sparse)  LOG_ROOT=$W/ppo_sparse_heldoutseeds_runs ;;
+  *) echo "no LOG_ROOT for REWARD=$REWARD"; exit 2 ;;
 esac
 SUMMARY=$LOG_ROOT/summary_${WHICH}.log
 MAX_STEP=40
