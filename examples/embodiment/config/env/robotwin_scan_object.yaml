@@ -108,6 +108,15 @@ student_reward:
   dino_repo_dir: /project_data/held/vxiao/Bimanual_Manipulation_Project/GAP-flowmatch-actiononly/thirdparty/dinov2
   dino_weights: /project_data/held/vxiao/Bimanual_Manipulation_Project/GAP-flowmatch-actiononly/pretrained/dinov2_vitl14_reg4_pretrain.pth
   coef: 0.05
+  offset: 0.0             # subtracted from the reward before coef, as svm_reward's offset is. 0.0 reproduces every
+                          # run before 2026-11-14. For reward_mode=raw set it to the midpoint of the mean V over
+                          # successful and over failed episodes of the base policy in this env, measured offline by
+                          # scripts/pinned-eval/calibrate_student_offset.py. Why it is needed: raw V is the task
+                          # teacher's logit 16 frames ahead, so mid-episode it is strongly negative even on a
+                          # trajectory that succeeds -- 91% of logged chunks were negative in a run whose episodes
+                          # succeeded 75% of the time. With normalize_advantages: true and use_critic_model: false
+                          # that common offset is not cancelled by anything; it enlarges the advantage std and
+                          # scales the sparse success signal down with it.
   clip: 5.0               # sized for reward_mode=progress, where r is a difference near zero. raw V is a teacher
                          # logit measured at -6.91..+2.86 on scan_object, so a raw run needs clip ~10 or every
                          # candidate of a chunk lands on the same bound and the chunk carries no signal

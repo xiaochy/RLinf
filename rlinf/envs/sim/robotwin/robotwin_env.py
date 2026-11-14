@@ -103,7 +103,7 @@ class RoboTwinEnv(gym.Env):
             # False once an env's episode has ended: later chunks of that env get no dense reward.
             self._svm_alive = torch.ones(self.num_envs, dtype=torch.bool)
 
-        # Alternative dense reward: track-conditioned student V(s, track) - V(s, 0). Reuses the svm_reward slots.
+        # Alternative dense reward: the track-conditioned student's V(s, track). Reuses the svm_reward slots.
         self._student_reward = False
         student_cfg = cfg.get("student_reward", None)
         if student_cfg is not None and student_cfg.get("enabled", False):
@@ -113,7 +113,17 @@ class RoboTwinEnv(gym.Env):
             self.svm_reward = StudentDenseReward(student_cfg, device="cuda")
             self._student_reward = True
             self.svm_coef = float(student_cfg.get("coef", 1.0))
-            self.svm_offset = 0.0
+            # Raw V is the task teacher's logit 16 frames ahead, so it carries a large common offset: on
+            # scan_object it ran -6.91..+2.86, and 91% of logged chunks were negative across every env in
+            # the batch while 75% of that run's episodes succeeded. "Negative" is therefore the normal
+            # state of a *successful* trajectory, not a signal that the chunk was bad. Advantages are
+            # whitened (normalize_advantages: true) and there is no separate critic (use_critic_model:
+            # false), so an unremoved offset does not cancel -- it inflates the advantage std and divides
+            # the sparse success signal down. offset recentres V the same way svm_reward's -0.29 recentres
+            # the action SVM: the midpoint of the mean V over successful and over failed episodes, i.e. the
+            # score that indicates neither. It is a constant measured offline, so unlike the V(s, 0)
+            # baseline it never queries the student off its training distribution.
+            self.svm_offset = float(student_cfg.get("offset", 0.0))
             self._svm_alive = torch.ones(self.num_envs, dtype=torch.bool)
 
         self._init_env()
@@ -479,6 +489,26 @@ class RoboTwinEnv(gym.Env):
             truncations = torch.logical_or(truncated, truncations)
         if svm_rewards is not None:
             ended = torch.logical_or(terminations, truncations).cpu()
+            # Offset calibration data, off unless STUDENT_V_DUMP names a file. One line per chunk per env
+            # with the raw reward and the episode-boundary flags, which is everything needed to average V
+            # over successful and over failed episodes afterwards. Dumped here because this is the only
+            # point where the reward and the *real* terminations coexist: ignore_terminations zeroes
+            # terminations a few lines below, and svm_reward is computed a few lines above.
+            _dump = os.environ.get("STUDENT_V_DUMP")
+            if _dump:
+                import json as _json  # noqa: PLC0415
+                _term = terminations.detach().cpu().reshape(-1).tolist()
+                _trunc = truncations.detach().cpu().reshape(-1).tolist()
+                _v = svm_rewards.detach().cpu().reshape(-1).tolist()
+                _al = self._svm_alive.reshape(-1).tolist()
+                with open(_dump, "a") as _fh:
+                    for _i in range(len(_v)):
+                        _fh.write(_json.dumps({
+                            "chunk": int(self._elapsed_steps[_i].item()) // chunk_step
+                            if hasattr(self._elapsed_steps, "__getitem__") else -1,
+                            "env": _i, "v": float(_v[_i]), "alive": bool(_al[_i]),
+                            "term": bool(_term[_i]), "trunc": bool(_trunc[_i]),
+                        }) + "\n")
             self._svm_alive &= ~ended
 
         infos = self._record_metrics(step_reward, infos)
