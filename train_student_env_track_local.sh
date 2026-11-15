@@ -129,8 +129,15 @@ for p in "$ASSETS/assets/embodiments/aloha-agilex/curobo_left.yml" \
 done
 echo "=== $(date) preflight OK ($WHICH, accelerator rank $RANK, reward=$REWARD, lr=${LR:-config default 5e-7}, seed=${SEED:-config default 1234}, offset=${OFFSET:-config default 0.0}, max_step=$MAX_STEP, base=$FM) ===" | tee -a "$SUMMARY"
 
+# Globs __rank* rather than the launch's own __rank${RANK}. The rank is which accelerator this
+# launch was handed, not part of the arm's identity -- every knob that makes a different arm
+# (reward, lr, seed, offset, n30/n100) is already either in LOG_ROOT or in BASE_CONFIG, so within
+# one LOG_ROOT all __rank* dirs are the same arm. Scoping by rank meant extending an arm on the
+# other GPU found nothing: the 2026-11-15 02:53 MAX_STEP=80 relaunch of the sparse lr-2e-6 arm was
+# handed GPU 0, its step-40 checkpoint sat under __rank1, and it restarted from the SFT base and
+# reported "latest ckpt=none (step 0)" -- a silent 40 steps of lost work, not an error.
 latest_ckpt() {
-    ls -d "$LOG_ROOT"/*-${CONFIG}/*/checkpoints/global_step_* 2>/dev/null \
+    ls -d "$LOG_ROOT"/*-${BASE_CONFIG}__rank*/*/checkpoints/global_step_* 2>/dev/null \
         | sed -E 's#(.*)global_step_([0-9]+)$#\2 \1global_step_\2#' | sort -n | tail -1 | cut -d' ' -f2
 }
 
