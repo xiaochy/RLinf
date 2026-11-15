@@ -1,10 +1,18 @@
 #!/bin/bash
-# Local 100-seed eval for the student env-track PPO checkpoints (step 40), on the same
-# held-out seed set and the same eval config as the 2026-11-01 10-checkpoint sweep, so the
-# numbers are directly comparable to it. Labels are passed as arguments; each needs a
-# ppo_checkpoints_step40/_resume/<label>/global_step_40 symlink.
+# Local 100-seed eval for the student env-track PPO checkpoints, on the same held-out seed
+# set and the same eval config as the 2026-11-01 10-checkpoint sweep, so the numbers are
+# directly comparable to it. Labels are passed as arguments; each needs a
+# ppo_checkpoints_step40/_resume/<label>/global_step_<step> symlink.
 #
 #   bash local_eval_runner_student_env.sh student_env_n100L0p5 [student_env_n30L0p5 ...]
+#
+# A label may carry a non-default checkpoint step as "<label>:<step>"; without one the step is
+# 40. This exists because the 2026-11-15 80-step extension of the sparse lr-2e-6 arm produces a
+# global_step_80, and the alternative -- symlinking step 80 under the name global_step_40 -- puts
+# a wrong step in the eval dir name, which is the only place the step is recorded once the run
+# is over.
+#
+#   bash local_eval_runner_student_env.sh sparse_lr2e6_ext80_n100L0p5:80
 #
 # The eval config places actor+rollout on GPU 0 and env on GPU 1, so this needs BOTH cards
 # idle; do not start it while a training run holds one.
@@ -70,9 +78,9 @@ base_for() {
 }
 
 run_eval() {
-  local label=$1 model_path=$2
-  local ckpt_dir=$CKPT_BASE/_resume/$label/global_step_40
-  local log_dir=$LOG_ROOT/$(date +'%Y%m%d-%H%M%S')-ppo_${label}_ckpt40_eval
+  local label=$1 model_path=$2 step=$3
+  local ckpt_dir=$CKPT_BASE/_resume/$label/global_step_$step
+  local log_dir=$LOG_ROOT/$(date +'%Y%m%d-%H%M%S')-ppo_${label}_ckpt${step}_eval
   mkdir -p "$log_dir"
   echo "=== $(date) starting $label (model_path=$model_path) ===" | tee -a "$SUMMARY"
 
@@ -122,8 +130,9 @@ check_path() {
 check_path "$ASSETS_PATH/assets/embodiments/aloha-agilex/curobo_left.yml" "curobo left config"
 check_path "$R/gap_root_local/thirdparty/dinov2/hubconf.py" "dinov2 repo"
 check_path "$R/gap_root_local/pretrained/dinov2_vitl14_reg4_pretrain.pth" "dinov2 weights"
-for l in "$@"; do
-  check_path "$CKPT_BASE/_resume/$l/global_step_40/actor" "resume dir $l"
+for spec in "$@"; do
+  l=${spec%%:*}; st=${spec##*:}; [ "$st" = "$spec" ] && st=40
+  check_path "$CKPT_BASE/_resume/$l/global_step_$st/actor" "resume dir $l (step $st)"
   [ -n "$(base_for "$l")" ] || { echo "PREFLIGHT: cannot tell the SFT base for label $l (expected n30 or n100 in the name)" | tee -a "$SUMMARY"; preflight_fail=1; }
   check_path "$(base_for "$l")" "fm_actiononly base for $l"
 done
@@ -134,8 +143,9 @@ fi
 if [ "$preflight_fail" -ne 0 ]; then echo "PREFLIGHT FAILED, nothing launched" | tee -a "$SUMMARY"; exit 1; fi
 echo "=== $(date) preflight OK for: $* ===" | tee -a "$SUMMARY"
 
-for l in "$@"; do
-  run_eval "$l" "$(base_for "$l")"
+for spec in "$@"; do
+  l=${spec%%:*}; st=${spec##*:}; [ "$st" = "$spec" ] && st=40
+  run_eval "$l" "$(base_for "$l")" "$st"
 done
 
 echo "STUDENT_ENV_EVALS_DONE" | tee -a "$SUMMARY"
