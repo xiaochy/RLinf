@@ -23,7 +23,15 @@ ROCM_VERSION=""
 RAY_COMPAT_DEPS=("protobuf>=6.33.5,<7")
 # ManiSkill and RoboTwin both run on SAPIEN, and RoboTwin's dependencies do not
 # install it.
-SAPIEN_SPEC="sapien==3.0.1; platform_system == 'Linux' and platform_machine == 'x86_64' and python_version < '3.14'"
+# 3.0.0b1, not 3.0.1: RoboTwin creates its wrist cameras with near=0.1 m
+# (envs/camera/camera.py) while the gripper fingers sit 80-101 mm from the lens, and
+# 3.0.1 clips them out of both wrist views where 3.0.0b1 renders them. The demos and
+# every SVM/student reward checkpoint were produced under 3.0.0b1, so serving those
+# models 3.0.1 images costs ~0.10-0.17 step AUC and flips the sign of the progress
+# correlation. Measured on scan_object seed 100100157: left-wrist mean RGB
+# [240.595 232.730 232.693] and min depth 80.098 mm under 3.0.0b1 against
+# [243.569 235.706 235.676] / 101.230 mm under 3.0.1.
+SAPIEN_SPEC="sapien==3.0.0b1; platform_system == 'Linux' and platform_machine == 'x86_64' and python_version < '3.14'"
 # PEP 440 local-version segment (including the leading '+') that
 # apply_torch_override appends to torch/torchvision/torchaudio overrides so uv
 # is forced to fetch the platform-specific wheel instead of the bare PyPI one.
