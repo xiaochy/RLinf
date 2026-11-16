@@ -77,6 +77,10 @@ base_for() {
   esac
 }
 
+# max_epochs is step+1, not a constant: the eval resumes <step> and runs exactly one more
+# epoch, whose val_check_interval=1 is what produces the eval. With the old hardcoded 41 a
+# step-80 checkpoint had nothing left to run, so the process exited 0 after FSDP init, wrote
+# zero scalars, and the runner recorded it as SUCCEEDED (2026-11-15 16:31, sparse_lr2e6_ext80).
 run_eval() {
   local label=$1 model_path=$2 step=$3
   local ckpt_dir=$CKPT_BASE/_resume/$label/global_step_$step
@@ -97,7 +101,7 @@ run_eval() {
       --config-path "$EMBODIED_PATH/config/" --config-name robotwin_scan_object_gap_flow_baseline_eval2_local \
       runner.logger.log_path="$log_dir" \
       runner.resume_dir="$ckpt_dir" \
-      runner.max_epochs=41 \
+      runner.max_epochs=$((step + 1)) \
       env.train.total_num_envs=2 \
       env.eval.total_num_envs=5 \
       env.eval.start_round=0 \
@@ -140,6 +144,16 @@ if /usr/bin/grep -rqs project_data "$ASSETS_PATH/assets/embodiments/"; then
   echo "PREFLIGHT: stale cross-cluster paths in embodiment configs; run RoboTwin-RLinf-rgb/script/update_embodiment_config_path.py from $ASSETS_PATH" | tee -a "$SUMMARY"
   preflight_fail=1
 fi
+# Both cards must be close to empty. The eval config puts actor+rollout on GPU 0 and 5 envs on
+# GPU 1 and needs ~15 GiB on each; when a PPO arm holds the box it instead OOMs inside the first
+# SubEnv reset, burns both attempts in ~5 min each, and the only trace is "GAVE UP"
+# (2026-11-15 18:41, re-eval of sparse_lr2e6_ext80 against two arms launched at 18:37).
+while read -r idx free; do
+  if [ "$free" -lt 18000 ]; then
+    echo "PREFLIGHT: GPU $idx has only ${free} MiB free; this eval needs ~18 GiB on each card" | tee -a "$SUMMARY"
+    preflight_fail=1
+  fi
+done < <(nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits | tr -d ',')
 if [ "$preflight_fail" -ne 0 ]; then echo "PREFLIGHT FAILED, nothing launched" | tee -a "$SUMMARY"; exit 1; fi
 echo "=== $(date) preflight OK for: $* ===" | tee -a "$SUMMARY"
 
