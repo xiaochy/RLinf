@@ -143,21 +143,44 @@ class StudentDenseReward:
         for p in (str(cfg.student_repo), str(cfg.svm_repo)):
             if p not in sys.path:
                 sys.path.insert(0, p)
-        from mv_distill.reward import MVStudentReward  # noqa: PLC0415
         from svm import preprocess  # noqa: PLC0415
 
         self.device = torch.device(device)
         self.pp = preprocess
         dino = load_local_dino(str(cfg.dino_repo_dir), str(cfg.dino_weights), self.device)
-        self.student = MVStudentReward(str(cfg.student_ckpt), device=str(self.device), dino=dino)
-        self.track_source = str(cfg.get("track_source", "dynamics"))
-        if self.track_source not in ("dynamics", "env"):
-            raise ValueError(f"student_reward.track_source must be 'dynamics' or 'env', got {self.track_source!r}")
-        self.tracker = (
-            TrackClient(str(cfg.worker_python), str(cfg.dynamics_ckpt), str(self.device))
-            if self.track_source == "dynamics"
-            else None
-        )
+
+        # Two different scorers, chosen by student_reward.model.
+        #
+        #   track_student  V(s, track): the 2026-11 sweep's reward. Needs the 3D point track of the
+        #                  executed chunk, which comes either from the simulator (track_source=env,
+        #                  ground truth, NOT available on hardware) or from the dynamics model
+        #                  (track_source=dynamics, deployable but another model in the loop).
+        #   action_value   V(s, a) of Mercury007/mv-action-value-scan-object: scores the COMMANDED
+        #                  16-step pose chunk directly. No track, no dynamics model, no simulator
+        #                  state -- so unlike every reward in that sweep it is computable on
+        #                  hardware, and computable BEFORE the chunk is executed.
+        self.model_kind = str(cfg.get("model", "track_student"))
+        if self.model_kind not in ("track_student", "action_value"):
+            raise ValueError(f"student_reward.model must be 'track_student' or 'action_value', got {self.model_kind!r}")
+
+        if self.model_kind == "action_value":
+            from svm.reward_model import MVActionValue  # noqa: PLC0415
+
+            self.student = MVActionValue(str(cfg.action_value_ckpt), device=str(self.device), dino=dino)
+            self.track_source = "none"
+            self.tracker = None
+        else:
+            from mv_distill.reward import MVStudentReward  # noqa: PLC0415
+
+            self.student = MVStudentReward(str(cfg.student_ckpt), device=str(self.device), dino=dino)
+            self.track_source = str(cfg.get("track_source", "dynamics"))
+            if self.track_source not in ("dynamics", "env"):
+                raise ValueError(f"student_reward.track_source must be 'dynamics' or 'env', got {self.track_source!r}")
+            self.tracker = (
+                TrackClient(str(cfg.worker_python), str(cfg.dynamics_ckpt), str(self.device))
+                if self.track_source == "dynamics"
+                else None
+            )
         self.reward_mode = str(cfg.get("reward_mode", "raw"))
         if self.reward_mode not in ("raw", "progress"):
             raise ValueError(f"student_reward.reward_mode must be 'raw' or 'progress', got {self.reward_mode!r}")
@@ -169,6 +192,10 @@ class StudentDenseReward:
         self._chunks_clipflat = 0
         self._chunks_degenerate = 0
         self._last_flat = None
+
+    def _label(self) -> str:
+        return (f"action_value/{self.reward_mode}" if self.model_kind == "action_value"
+                else f"{self.track_source}/{self.reward_mode}")
 
     @staticmethod
     def _np(x):
@@ -208,6 +235,10 @@ class StudentDenseReward:
         """Snapshot what the chunk will be scored against, before it is executed."""
         obs = self._obs(extracted_obs)
         B = len(obs["state"])
+        if self.model_kind == "action_value":
+            # Nothing to snapshot beyond the observation and the chunk: V(s, a) reads only those.
+            # patch_centres and the PoseRecorder exist to build a track, and there is no track here.
+            return {"obs": obs, "actions": np.asarray(chunk_actions, dtype=np.float32)}
         centres = np.zeros((B, 391, 3), np.float32)
         valid = np.zeros((B, 391), bool)
         rows = np.zeros((B, 391), np.int64)
@@ -227,12 +258,56 @@ class StudentDenseReward:
             "owner_rows": rows,
         }
 
+
+    def _flat_check(self, B, r, raw):
+        """Count and periodically report chunks where every env got the identical reward."""
+        if B > 1:
+            if float(r.max() - r.min()) < 1e-6:
+                _clipped = float(np.abs(raw).min()) >= self.clip - 1e-6
+                if _clipped:
+                    self._chunks_clipflat += 1
+                else:
+                    self._chunks_degenerate += 1
+                self._last_flat = (
+                    "pinned to the clip" if _clipped else "degenerate inputs",
+                    self._chunks_scored, float(raw.min()), float(raw.max()),
+                )
+            if self._chunks_scored % 100 == 0 and self._last_flat is not None:
+                _kind, _at, _lo, _hi = self._last_flat
+                _frac = 100.0 * self._chunks_clipflat / self._chunks_scored
+                (_logger.warning if _frac >= 5.0 else _logger.info)(
+                    "student_reward[%s]: of %d chunks, %d (%.0f%%) gave every env the same reward "
+                    "at the |clip| = %.1f bound, %d from identical student inputs instead (the clip is "
+                    "not why); last flat chunk was %d, %s, raw %.3f..%.3f",
+                    self._label(), self._chunks_scored, self._chunks_clipflat,
+                    _frac, self.clip, self._chunks_degenerate, _at, _kind, _lo, _hi,
+                )
+
     @torch.no_grad()
     def finish_chunk(self, state: dict, task_envs) -> torch.Tensor:
         """[num_envs] progress rewards for the chunk ``begin_chunk`` snapshotted."""
         obs, H = state["obs"], self.horizon
         B = len(obs["state"])
         head_dino = self.pp.dino_features(self.student.dino, obs["head_rgb"], self.device).cpu().numpy()
+
+        if self.model_kind == "action_value":
+            obs["action"] = state["actions"][:, :H]
+            if self.reward_mode == "progress":
+                # V(s, a) - V(s, hold), the student's estimate of T_{t+16} - T_t. Costs a second
+                # forward pass of the head, not a second DINOv2 pass.
+                raw = self.student.rewards(obs, head_dino=head_dino, chunk=self.batch_size)
+            else:
+                raw = self.student.values(obs, head_dino=head_dino, chunk=self.batch_size)
+            r = np.clip(raw, -self.clip, self.clip)
+            self._chunks_scored += 1
+            self._flat_check(B, r, raw)
+            if self._chunks_scored <= 5 or self._chunks_scored % 100 == 0:
+                _logger.info(
+                    "student_reward[action_value/%s] chunk %d: |action| max %.4f, raw %.3f..%.3f, r %.3f..%.3f",
+                    self.reward_mode, self._chunks_scored, float(np.abs(obs["action"]).max()),
+                    float(raw.min()), float(raw.max()), float(r.min()), float(r.max()),
+                )
+            return torch.as_tensor(r, dtype=torch.float32)
 
         if self.track_source == "env":
             track = np.zeros((B, 391, H, 3), np.float32)
@@ -278,27 +353,7 @@ class StudentDenseReward:
         # Blaming the clip for a degenerate chunk is a false alarm that reads exactly like the real
         # defect, so the two are counted apart, only the clip rate escalates to a warning, and the
         # message quotes the offending chunk instead of whichever chunk happened to be the hundredth.
-        if B > 1:
-            if float(r.max() - r.min()) < 1e-6:
-                _clipped = float(np.abs(raw).min()) >= self.clip - 1e-6
-                if _clipped:
-                    self._chunks_clipflat += 1
-                else:
-                    self._chunks_degenerate += 1
-                self._last_flat = (
-                    "pinned to the clip" if _clipped else "degenerate inputs",
-                    self._chunks_scored, float(raw.min()), float(raw.max()),
-                )
-            if self._chunks_scored % 100 == 0 and self._last_flat is not None:
-                _kind, _at, _lo, _hi = self._last_flat
-                _frac = 100.0 * self._chunks_clipflat / self._chunks_scored
-                (_logger.warning if _frac >= 5.0 else _logger.info)(
-                    "student_reward[%s/%s]: of %d chunks, %d (%.0f%%) gave every env the same reward "
-                    "at the |clip| = %.1f bound, %d from identical student inputs instead (the clip is "
-                    "not why); last flat chunk was %d, %s, raw %.3f..%.3f",
-                    self.track_source, self.reward_mode, self._chunks_scored, self._chunks_clipflat,
-                    _frac, self.clip, self._chunks_degenerate, _at, _kind, _lo, _hi,
-                )
+        self._flat_check(B, r, raw)
         if self._chunks_scored <= 5 or self._chunks_scored % 100 == 0:
             moved = np.abs(track[..., -1, :]).sum(-1) > 1e-4
             _logger.info(
