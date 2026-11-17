@@ -165,19 +165,45 @@ fi
 # and the eval's modest 3.4 GiB fails for lack of room rather than for lack of a 15 GiB appetite.
 NEED_0=6000      # 3.4 GiB measured + headroom
 NEED_1=22000     # 20.0 GiB measured + headroom
-while read -r idx free; do
-  case "$idx" in 0) need=$NEED_0 ;; 1) need=$NEED_1 ;; *) need=$NEED_1 ;; esac
-  if [ "$free" -lt "$need" ]; then
-    echo "PREFLIGHT: GPU $idx has only ${free} MiB free; this eval needs ${need} MiB there" \
-      | tee -a "$SUMMARY"
-    preflight_fail=1
-  fi
-done < <(nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits | tr -d ',')
-if [ "$preflight_fail" -ne 0 ]; then echo "PREFLIGHT FAILED, nothing launched" | tee -a "$SUMMARY"; exit 1; fi
-echo "=== $(date) preflight OK for: $* ===" | tee -a "$SUMMARY"
 
+# The memory check is PER EVAL, not per invocation. The static checks above (file existence,
+# base resolution) are properties of the arguments and are settled once; free VRAM is not --
+# it changes while the chain runs. As a single gate before the loop it was checked once for a
+# four-eval chain, so evals 2..4 launched against whatever the box looked like hours earlier.
+# That is how the 11-16 chain could have OOMed despite "preflight OK".
+gpu_memory_ok() {
+  local bad=0 idx free need
+  while read -r idx free; do
+    case "$idx" in 0) need=$NEED_0 ;; 1) need=$NEED_1 ;; *) need=$NEED_1 ;; esac
+    if [ "$free" -lt "$need" ]; then
+      echo "  GPU $idx has only ${free} MiB free; this eval needs ${need} MiB there" \
+        | tee -a "$SUMMARY"
+      bad=1
+    fi
+  done < <(nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits | tr -d ',')
+  return $bad
+}
+
+if [ "$preflight_fail" -ne 0 ]; then echo "PREFLIGHT FAILED, nothing launched" | tee -a "$SUMMARY"; exit 1; fi
+echo "=== $(date) static preflight OK for: $* ===" | tee -a "$SUMMARY"
+
+# Wait rather than fail: a chain launched behind a training job should start when the box frees
+# up, not abort. 4 h matches the drain gate the launcher already uses.
+MEM_WAIT_TICKS=${MEM_WAIT_TICKS:-240}
 for spec in "$@"; do
   l=${spec%%:*}; st=${spec##*:}; [ "$st" = "$spec" ] && st=40
+  i=0
+  until gpu_memory_ok; do
+    i=$((i + 1))
+    if [ "$i" -ge "$MEM_WAIT_TICKS" ]; then
+      echo "=== $(date) GIVING UP on $l: GPU memory never freed after ${i} min ===" | tee -a "$SUMMARY"
+      break
+    fi
+    [ $((i % 30)) = 1 ] && echo "=== $(date) $l waiting for GPU memory (tick $i/$MEM_WAIT_TICKS) ===" | tee -a "$SUMMARY"
+    sleep 60
+  done
+  if [ "$i" -ge "$MEM_WAIT_TICKS" ]; then continue; fi
+  echo "=== $(date) GPU memory OK for $l ===" | tee -a "$SUMMARY"
   run_eval "$l" "$(base_for "$l")" "$st"
 done
 
