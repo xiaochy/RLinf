@@ -144,13 +144,32 @@ if /usr/bin/grep -rqs project_data "$ASSETS_PATH/assets/embodiments/"; then
   echo "PREFLIGHT: stale cross-cluster paths in embodiment configs; run RoboTwin-RLinf-rgb/script/update_embodiment_config_path.py from $ASSETS_PATH" | tee -a "$SUMMARY"
   preflight_fail=1
 fi
-# Both cards must be close to empty. The eval config puts actor+rollout on GPU 0 and 5 envs on
-# GPU 1 and needs ~15 GiB on each; when a PPO arm holds the box it instead OOMs inside the first
-# SubEnv reset, burns both attempts in ~5 min each, and the only trace is "GAVE UP"
-# (2026-11-15 18:41, re-eval of sparse_lr2e6_ext80 against two arms launched at 18:37).
+# The requirement is ASYMMETRIC, measured 2026-11-16 23:40 on a live eval, steady over 24 s:
+#
+#   card 0   ray::EmbodiedFSDPActor            1426 MiB
+#   card 0   ray::MultiStepRolloutWorker       1944 MiB    -> ~3.4 GiB total
+#   card 1   ray::EnvWorker.evaluate          19962 MiB    -> ~20 GiB
+#
+# The earlier comment here said "~15 GiB on each" and the gate asked 18 GiB of both. That was an
+# inference from the 2026-11-15 18:41 OOM, not a measurement, and it is wrong in BOTH directions:
+#
+#  - card 0 never needs 18 GiB. Asking for it refuses launches that would have been fine, which
+#    is how the gate came to block for hours with a card sitting idle.
+#  - card 1 needs MORE than 18 GiB. 19962 > 18000, so the old gate would PASS with 18 GiB free
+#    and then the EnvWorker would OOM inside the first SubEnv reset -- exactly the failure the
+#    comment was written to prevent.
+#
+# Why the 11-15 OOM looked symmetric: a PPO arm was holding the box, and a TRAINING job puts its
+# big EnvWorker on card 0 (the rawv_s3456 OOM at 17:40 on 11-16 reported "GPU 0 ... Process
+# 1118040 has 12.34 GiB"). So under contention card 0 is where the TRAINING job's worker sits,
+# and the eval's modest 3.4 GiB fails for lack of room rather than for lack of a 15 GiB appetite.
+NEED_0=6000      # 3.4 GiB measured + headroom
+NEED_1=22000     # 20.0 GiB measured + headroom
 while read -r idx free; do
-  if [ "$free" -lt 18000 ]; then
-    echo "PREFLIGHT: GPU $idx has only ${free} MiB free; this eval needs ~18 GiB on each card" | tee -a "$SUMMARY"
+  case "$idx" in 0) need=$NEED_0 ;; 1) need=$NEED_1 ;; *) need=$NEED_1 ;; esac
+  if [ "$free" -lt "$need" ]; then
+    echo "PREFLIGHT: GPU $idx has only ${free} MiB free; this eval needs ${need} MiB there" \
+      | tee -a "$SUMMARY"
     preflight_fail=1
   fi
 done < <(nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits | tr -d ',')
