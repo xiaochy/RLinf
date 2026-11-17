@@ -8,7 +8,13 @@ while true; do
     ppo_done=0; sft_done=0
     grep -q STUDENT_ENV_EVALS_DONE eval_logs_student_env/summary.log 2>/dev/null && ppo_done=1
     grep -q SFT_BASELINE_EVALS_DONE eval_logs_sft_baseline/summary.log 2>/dev/null && sft_done=1
-    alive=$(pgrep -fc "local_eval_runner_(student_env|sft_baseline)\.sh" 2>/dev/null || echo 0)
+    # `pgrep -fc` PRINTS 0 and EXITS 1 with no match, so `|| echo 0` appended a second 0 and
+    # alive became the two-line string "0\n0". `[ "$alive" = 0 ]` then never fired, which
+    # disabled exactly the "runner died" branch this script says at the top it exists for:
+    # it would still report once both DONE markers appeared, and report nothing if a runner
+    # was killed. Take the first line and default an empty value instead.
+    alive=$(pgrep -fc "local_eval_runner_(student_env|sft_baseline)\.sh" 2>/dev/null)
+    alive=${alive%%$'\n'*}; alive=${alive:-0}
     if { [ "$ppo_done" = 1 ] && [ "$sft_done" = 1 ]; } || [ "$alive" = 0 ]; then
         echo "=== $(date) local eval report (ppo_done=$ppo_done sft_done=$sft_done runners_alive=$alive) ==="
         for f in eval_logs_student_env/summary.log eval_logs_sft_baseline/summary.log; do
