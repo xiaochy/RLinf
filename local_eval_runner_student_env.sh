@@ -89,15 +89,52 @@ base_for() {
   esac
 }
 
-# max_epochs is step+1, not a constant: the eval resumes <step> and runs exactly one more
-# epoch, whose val_check_interval=1 is what produces the eval. With the old hardcoded 41 a
-# step-80 checkpoint had nothing left to run, so the process exited 0 after FSDP init, wrote
-# zero scalars, and the runner recorded it as SUCCEEDED (2026-11-15 16:31, sparse_lr2e6_ext80).
+# This no longer resumes, and that is the point. 2026-11-18: evaluating through
+# `runner.resume_dir` does not evaluate the checkpoint.
+#
+#   embodied_runner.run()      for _step in range(start_step, max_steps):
+#                                  rollout -> actor training -> global_step += 1
+#                                  -> _maybe_eval_and_checkpoint()   <- the eval
+#
+# The eval is INSIDE the loop body, after an update, so `max_epochs=step+1` buys one rollout,
+# one PPO update, and then the eval of the UPDATED weights. The eval config pins
+# `actor.optim.lr=1e-12` to make that forced step a no-op -- which works for the SFT baseline,
+# whose log shows `actor/lr=1.00e-12`. It does NOT work here: `load_checkpoint` restores the
+# lr_scheduler along with the model and optimizer (hybrid_engines/fsdp/strategy/base.py:289),
+# and the restored scheduler's base_lrs carry the training lr. The step-20 eval's own
+# metrics.log says `actor/lr=2.00e-06`.
+#
+# What that stray update is worth, measured on that run: approx_kl -0.061 and ratio_abs 0.203,
+# against 0.0008-0.015 and 0.03-0.10 for the 23 real training steps of the same arm -- because
+# it is computed from env.train.total_num_envs=2 trajectories instead of 12 (grad_norm 280 vs
+# ~50). It is larger than any genuine step and ~40% of the whole run's cumulative KL.
+#
+# So the checkpoint is repackaged as a GAP-style .ckpt and loaded through
+# `actor.model.model_path` with NO resume: the lr pin then holds, nothing trains, and the
+# evaluated weights are the checkpoint's own -- on exactly the code path the SFT baseline
+# uses, which is what makes a PPO cell and its base comparable.
+#
+# Kept for the record: with the old hardcoded max_epochs=41 a step-80 checkpoint had nothing
+# left to run, so the process exited 0 after FSDP init, wrote zero scalars, and the runner
+# recorded it as SUCCEEDED (2026-11-15 16:31, sparse_lr2e6_ext80).
 run_eval() {
-  local label=$1 model_path=$2 step=$3
+  local label=$1 base_ckpt=$2 step=$3
   local ckpt_dir=$CKPT_BASE/_resume/$label/global_step_$step
   local log_dir=$LOG_ROOT/$(date +'%Y%m%d-%H%M%S')-ppo_${label}_ckpt${step}_eval
   mkdir -p "$log_dir"
+
+  # Repackage the FSDP checkpoint as a .ckpt the no-resume path can load. The converter
+  # refuses rather than writes when the key sets do not match the base's, because
+  # gap_flow_rl.py loads with strict=False and a name mismatch would silently score the base.
+  local model_path=$CKPT_BASE/_asckpt/${label}_step${step}.ckpt
+  mkdir -p "$CKPT_BASE/_asckpt"
+  if ! python "$R/ppo_ckpt_to_eval_ckpt.py" \
+         --ppo-ckpt "$ckpt_dir/actor/model_state_dict/full_weights.pt" \
+         --base-ckpt "$base_ckpt" \
+         --out "$model_path" >> "$SUMMARY" 2>&1; then
+    echo "=== $(date) $label step $step: checkpoint conversion FAILED, nothing evaluated ===" | tee -a "$SUMMARY"
+    return 1
+  fi
   echo "=== $(date) starting $label (model_path=$model_path) ===" | tee -a "$SUMMARY"
 
   local attempt rc
@@ -112,8 +149,7 @@ run_eval() {
     timeout --kill-after=15 "$ATTEMPT_TIMEOUT" python "$EMBODIED_PATH/train_embodied_agent.py" \
       --config-path "$EMBODIED_PATH/config/" --config-name robotwin_scan_object_gap_flow_baseline_eval2_local \
       runner.logger.log_path="$log_dir" \
-      runner.resume_dir="$ckpt_dir" \
-      runner.max_epochs=$((step + 1)) \
+      runner.max_epochs=1 \
       env.train.total_num_envs=2 \
       env.eval.total_num_envs=5 \
       env.eval.start_round=0 \
@@ -144,11 +180,12 @@ check_path() {
   if [ ! -e "$1" ]; then echo "PREFLIGHT MISSING: $2 -> $1" | tee -a "$SUMMARY"; preflight_fail=1; fi
 }
 check_path "$ASSETS_PATH/assets/embodiments/aloha-agilex/curobo_left.yml" "curobo left config"
+check_path "$R/ppo_ckpt_to_eval_ckpt.py" "ppo->ckpt converter"
 check_path "$R/gap_root_local/thirdparty/dinov2/hubconf.py" "dinov2 repo"
 check_path "$R/gap_root_local/pretrained/dinov2_vitl14_reg4_pretrain.pth" "dinov2 weights"
 for spec in "$@"; do
   l=${spec%%:*}; st=${spec##*:}; [ "$st" = "$spec" ] && st=40
-  check_path "$CKPT_BASE/_resume/$l/global_step_$st/actor" "resume dir $l (step $st)"
+  check_path "$CKPT_BASE/_resume/$l/global_step_$st/actor/model_state_dict/full_weights.pt" "full weights $l (step $st)"
   [ -n "$(base_for "$l")" ] || { echo "PREFLIGHT: cannot tell the SFT base for label $l (expected n30 or n100 in the name)" | tee -a "$SUMMARY"; preflight_fail=1; }
   check_path "$(base_for "$l")" "fm_actiononly base for $l"
 done
