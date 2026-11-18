@@ -52,6 +52,14 @@ SUMMARY=$LOG_ROOT/summary.log
 
 FM30=$R/fm_actiononly_30demo_ckpt/200.ckpt
 FM100=$R/fm_actiononly_100demo_ckpt/200.ckpt
+# The 2026-11-18 arms start PPO from epoch 50 and epoch 100 of the SAME fm_actiononly run, not
+# from 200, and model_path is not only the initial weights -- gap_flow_rl.py reads
+# ckpt["normalizer"] from it and calls policy.set_normalizer(), which the FSDP resume does NOT
+# restore. So evaluating a from50 arm against 200.ckpt would run weights trained under one
+# normalizer through another. Verified identical for this run (see the md5 note below), but the
+# right base is cheap and removes the question.
+FM100_E50=$R/fm_actiononly_100demo_ckpt/50.ckpt
+FM100_E100=$R/fm_actiononly_100demo_ckpt/100.ckpt
 
 ATTEMPT_TIMEOUT=16200  # 4h30m; the 2026-11-01 sweep measured 2h02m (n100) to 3h11m (n30)
 MAX_ATTEMPTS=2         # one retry in case the first attempt hits the intermittent init race
@@ -70,9 +78,13 @@ cleanup_ray_scoped() {
 }
 
 base_for() {
+  # Order matters: the from50 / from100 cases must come before the bare n100 case, which is
+  # the 200-epoch default every arm before 2026-11-18 used.
   case "$1" in
-    *n30*)  echo "$FM30" ;;
-    *n100*) echo "$FM100" ;;
+    *n30*)             echo "$FM30" ;;
+    *from50*n100*|*n100*from50*)   echo "$FM100_E50" ;;
+    *from100*n100*|*n100*from100*) echo "$FM100_E100" ;;
+    *n100*)            echo "$FM100" ;;
     *) echo "" ;;
   esac
 }
