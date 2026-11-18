@@ -45,9 +45,20 @@ SUMMARY=$LOG_ROOT/summary.log
 ATTEMPT_TIMEOUT=16200
 # MAX_EPOCHS is the runner's step budget, and it decides how much runs AFTER the
 # eval. The loop body is rollout -> update -> eval, so the first eval is always the
-# number wanted; everything past it is PPO training this script has no use for. The
-# PPO arm got away with the default because resume_dir set global_step=40 and 41-40
-# leaves one iteration. Starting from 0, MAX_EPOCHS=1 gives the same single pass.
+# number wanted; everything past it is PPO training this script has no use for.
+# Starting from 0, MAX_EPOCHS=1 gives one rollout, one update and one eval.
+#
+# That one update is a no-op HERE and only here. This script never sets resume_dir,
+# so the lr_scheduler is built fresh from the config and actor.optim.lr=1e-12 holds:
+# the logs read actor/lr=1.00e-12 and grad_norm ~320, i.e. a ~3e-10 weight change,
+# so the measured policy is the checkpoint named in actor.model.model_path.
+# The PPO arm did NOT get away with the same default. An earlier version of this
+# comment said it did, on the theory that resume_dir set global_step=40 and 41-40
+# left one iteration -- the arithmetic was right and the conclusion was wrong,
+# because load_checkpoint restores the lr_scheduler too (fsdp/strategy/base.py:289)
+# and its base_lrs carry the training lr, so a resuming eval logs actor/lr=2.00e-06
+# and applies a real 2-trajectory update before measuring. That is why the PPO side
+# now converts the checkpoint instead of resuming; see local_eval_runner_student_env.sh.
 MAX_ATTEMPTS=2
 
 # n100_e50 / n100_e100 added 2026-11-18. The six arms launched that day start PPO from epoch
