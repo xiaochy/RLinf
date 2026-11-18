@@ -50,10 +50,17 @@ ATTEMPT_TIMEOUT=16200
 # leaves one iteration. Starting from 0, MAX_EPOCHS=1 gives the same single pass.
 MAX_ATTEMPTS=2
 
+# n100_e50 / n100_e100 added 2026-11-18. The six arms launched that day start PPO from epoch
+# 50 and epoch 100 of fm_actiononly_100demo, so the published base of 82.33 -- which is epoch
+# 200 -- is NOT what their cells are read against: it is 150 epochs further trained. Without a
+# same-seed number for the starting policy itself, a step-20 cell at, say, 67% cannot be told
+# apart from "PPO helped a weak policy" and "PPO hurt a strong one".
 base_for() {
   case "$1" in
-    n30)  echo "$R/fm_actiononly_30demo_ckpt/200.ckpt" ;;
-    n100) echo "$R/fm_actiononly_100demo_ckpt/200.ckpt" ;;
+    n30)       echo "$R/fm_actiononly_30demo_ckpt/200.ckpt" ;;
+    n100)      echo "$R/fm_actiononly_100demo_ckpt/200.ckpt" ;;
+    n100_e50)  echo "$R/fm_actiononly_100demo_ckpt/50.ckpt" ;;
+    n100_e100) echo "$R/fm_actiononly_100demo_ckpt/100.ckpt" ;;
     *) echo "" ;;
   esac
 }
@@ -72,7 +79,7 @@ cleanup_ray_scoped() {
 preflight_fail=0
 for l in "$@"; do
   m=$(base_for "$l")
-  [ -n "$m" ] || { echo "PREFLIGHT: unknown label $l (expected n30 or n100)" | tee -a "$SUMMARY"; preflight_fail=1; continue; }
+  [ -n "$m" ] || { echo "PREFLIGHT: unknown label $l (expected n30, n100, n100_e50 or n100_e100)" | tee -a "$SUMMARY"; preflight_fail=1; continue; }
   [ -e "$m" ] || { echo "PREFLIGHT MISSING: $m" | tee -a "$SUMMARY"; preflight_fail=1; }
 done
 [ -e "$ASSETS_PATH/assets/embodiments/aloha-agilex/curobo_left.yml" ] \
